@@ -3,6 +3,7 @@
 #include "MainPage.g.cpp"
 
 using namespace winrt;
+using namespace Windows::ApplicationModel;
 using namespace Windows::UI::Xaml;
 
 namespace winrt::appservice::implementation
@@ -25,5 +26,7 @@ namespace winrt::appservice::implementation
     void MainPage::ClickHandler(IInspectable const&, RoutedEventArgs const&)
     {
         myButton().Content(box_value(L"Clicked"));
+
+        FullTrustProcessLauncher::LaunchFullTrustProcessForCurrentAppAsync();
     }
 }
