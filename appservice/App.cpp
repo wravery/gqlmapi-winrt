@@ -3,6 +3,8 @@
 #include "App.h"
 #include "MainPage.h"
 
+#include <algorithm>
+
 using namespace winrt;
 using namespace Windows::ApplicationModel;
 using namespace Windows::ApplicationModel::Activation;
@@ -25,6 +27,42 @@ App::App()
 {
     InitializeComponent();
     Suspending({ this, &App::OnSuspending });
+
+    {
+        JsonObject startService;
+
+        startService.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(0));
+        startService.SetNamedValue(L"type", JsonValue::CreateStringValue(L"startService"));
+        startService.SetNamedValue(L"useDefaultProfile", JsonValue::CreateBooleanValue(true));
+
+        JsonObject parseQuery;
+
+        parseQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(1));
+        parseQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"parseQuery"));
+        parseQuery.SetNamedValue(L"query", JsonValue::CreateStringValue(LR"gql(query {
+            __schema {
+                queryType {
+                    name
+                }
+                mutationType {
+                    name
+                }
+                subscriptionType {
+                    name
+                }
+                types {
+                    kind
+                    name
+                }
+            }
+        })gql"));
+
+        std::lock_guard lock { m_requestQueue.mutex };
+
+        m_requestQueue.requests.push_back(std::move(startService));
+        m_requestQueue.requests.push_back(std::move(parseQuery));
+    }
+
 
 #if defined _DEBUG && !defined DISABLE_XAML_GENERATED_BREAK_ON_UNHANDLED_EXCEPTION
     UnhandledException([this](IInspectable const&, UnhandledExceptionEventArgs const& e)
@@ -122,103 +160,103 @@ void App::OnNavigationFailed(IInspectable const&, NavigationFailedEventArgs cons
     throw hresult_error(E_FAIL, hstring(L"Failed to load Page ") + e.SourcePageType().Name);
 }
 
+ServiceConnection::ServiceConnection(int connectionId, App& app)
+    : m_connectionId { connectionId }
+    , m_app { app }
+{
+}
+
+void ServiceConnection::OnAppServicesCanceled(IBackgroundTaskInstance const& /*sender*/, BackgroundTaskCancellationReason const& /*reason*/)
+{
+    ShutdownService();
+}
+
+void ServiceConnection::OnServiceClosed(AppServiceConnection const& /*sender*/, AppServiceClosedEventArgs const& /*reason*/)
+{
+    ShutdownService();
+}
+
+void ServiceConnection::ShutdownService()
+{
+    m_backgroundTaskDeferral.Complete();
+    m_backgroundTaskDeferral = nullptr;
+    m_appServiceConnection = nullptr;
+
+    m_app.OnServiceConnectionShutdown(m_connectionId);
+}
+
 void App::OnBackgroundActivated(BackgroundActivatedEventArgs const& e)
 {
     auto taskInstance = e.TaskInstance();
     auto appServiceTrigger = taskInstance.TriggerDetails().as<AppServiceTriggerDetails>();
+    auto taskDeferral = taskInstance.GetDeferral();
 
-    m_backgroundTaskDeferral = taskInstance.GetDeferral();
-    taskInstance.Canceled({ get_weak(), &App::OnAppServicesCanceled });
+    if (m_requestQueue.shutdown)
+    {
+        taskDeferral.Complete();
+        return;
+    }
 
-    m_appServiceConnection = appServiceTrigger.AppServiceConnection();
-    m_appServiceConnection.RequestReceived({ get_weak(), &App::OnRequestReceived });
-    m_appServiceConnection.ServiceClosed({ get_weak(), &App::OnServiceClosed });
+    const int lastConnectionId = m_serviceConnections.empty() ? 0 : m_serviceConnections.crbegin()->first;
+    const int nextConnectionId = lastConnectionId + 1;
+
+    m_serviceConnections[nextConnectionId] = std::make_unique<ServiceConnection>(nextConnectionId, *this);
+
+    auto serviceConnection = m_serviceConnections[nextConnectionId].get();
+
+    serviceConnection->m_backgroundTaskDeferral = taskDeferral;
+    taskInstance.Canceled({ serviceConnection, &ServiceConnection::OnAppServicesCanceled });
+
+    serviceConnection->m_appServiceConnection = appServiceTrigger.AppServiceConnection();
+    serviceConnection->m_appServiceConnection.RequestReceived({ this, &App::OnRequestReceived });
+    serviceConnection->m_appServiceConnection.ServiceClosed({ serviceConnection, &ServiceConnection::OnServiceClosed });
+
+}
+
+void App::OnServiceConnectionShutdown(int connectionId)
+{
+    m_serviceConnections.erase(connectionId);
 }
 
 IAsyncAction App::OnRequestReceived(AppServiceConnection const& /*sender*/, AppServiceRequestReceivedEventArgs const& args)
 {
     auto messageDeferral = args.GetDeferral();
-    auto message = args.Request().Message();
+    auto messageRequest = args.Request();
+    auto message = messageRequest.Message();
     const std::wstring_view command { message.Lookup(L"command").as<hstring>() };
 
     if (command == L"get-requests")
     {
+        apartment_context callingThread;
+
+        co_await resume_background();
+
+        std::unique_lock lock { m_requestQueue.mutex };
+
+        m_requestQueue.condition.wait(lock, [this]() noexcept
+        {
+            return m_requestQueue.shutdown
+                || !m_requestQueue.requests.empty();
+        });
+
+        com_array<hstring> requests(static_cast<com_array<hstring>::size_type>(m_requestQueue.requests.size()));
+
+        std::transform(m_requestQueue.requests.begin(), m_requestQueue.requests.end(), requests.begin(),
+            [](const JsonObject& request) -> hstring
+        {
+            return request.ToString();
+        });
+
+        m_requestQueue.requests.clear();
+        lock.unlock();
+
+        co_await callingThread;
+
         ValueSet returnValue;
 
-        // Start with canned requests, these should be queued
-        if (parsedId < 0)
-        {
-            JsonObject startService;
+        returnValue.Insert(L"requests", PropertyValue::CreateStringArray(requests));
 
-            startService.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(0));
-            startService.SetNamedValue(L"type", JsonValue::CreateStringValue(L"startService"));
-            startService.SetNamedValue(L"useDefaultProfile", JsonValue::CreateBooleanValue(true));
-
-            JsonObject parseQuery;
-
-            parseQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(1));
-            parseQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"parseQuery"));
-            parseQuery.SetNamedValue(L"query", JsonValue::CreateStringValue(LR"gql(query {
-                __schema {
-                    queryType {
-                        name
-                    }
-                    mutationType {
-                        name
-                    }
-                    subscriptionType {
-                        name
-                    }
-                    types {
-                        kind
-                        name
-                    }
-                }
-            })gql"));
-
-            auto requests = PropertyValue::CreateStringArray({
-                startService.ToString(),
-                parseQuery.ToString(),
-            });
-
-            returnValue.Insert(L"requests", requests);
-        }
-        else if (results.empty())
-        {
-            JsonObject fetchQuery;
-
-            fetchQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(2));
-            fetchQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"fetchQuery"));
-            fetchQuery.SetNamedValue(L"queryId", JsonValue::CreateNumberValue(parsedId));
-
-            auto requests = PropertyValue::CreateStringArray({
-                fetchQuery.ToString(),
-            });
-
-            returnValue.Insert(L"requests", requests);
-        }
-        else
-        {
-            JsonObject discardQuery;
-
-            discardQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(3));
-            discardQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"discardQuery"));
-            discardQuery.SetNamedValue(L"queryId", JsonValue::CreateNumberValue(parsedId));
-
-            JsonObject stopService;
-
-            stopService.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(4));
-            stopService.SetNamedValue(L"type", JsonValue::CreateStringValue(L"stopService"));
-
-            auto requests = PropertyValue::CreateStringArray({
-                discardQuery.ToString(),
-                stopService.ToString(),
-            });
-
-            returnValue.Insert(L"requests", requests);
-        }
-
-        co_await args.Request().SendResponseAsync(returnValue);
+        co_await messageRequest.SendResponseAsync(returnValue);
     }
     else if (command == L"send-responses")
     {
@@ -235,33 +273,62 @@ IAsyncAction App::OnRequestReceived(AppServiceConnection const& /*sender*/, AppS
             if (requestId == 1 && type == L"parsed")
             {
                 parsedId = static_cast<int>(responseObject.GetNamedNumber(L"queryId"));
+
+                JsonObject fetchQuery;
+
+                fetchQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(2));
+                fetchQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"fetchQuery"));
+                fetchQuery.SetNamedValue(L"queryId", JsonValue::CreateNumberValue(parsedId));
+
+                std::unique_lock lock { m_requestQueue.mutex };
+
+                m_requestQueue.requests.push_back(std::move(fetchQuery));
+
+                lock.unlock();
+                m_requestQueue.condition.notify_one();
+            }
+            else if (requestId == 2 && type == L"next")
+            {
+                results = responseObject.GetNamedObject(L"data").ToString();
             }
             else if (requestId == 2 && type == L"complete")
             {
-                results = responseObject.GetNamedObject(L"data").ToString();
+                JsonObject unsubscribe;
+
+                unsubscribe.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(3));
+                unsubscribe.SetNamedValue(L"type", JsonValue::CreateStringValue(L"unsubscribe"));
+                unsubscribe.SetNamedValue(L"queryId", JsonValue::CreateNumberValue(parsedId));
+
+                JsonObject discardQuery;
+
+                discardQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(4));
+                discardQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"discardQuery"));
+                discardQuery.SetNamedValue(L"queryId", JsonValue::CreateNumberValue(parsedId));
+
+                JsonObject stopService;
+
+                stopService.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(5));
+                stopService.SetNamedValue(L"type", JsonValue::CreateStringValue(L"stopService"));
+
+                std::unique_lock lock { m_requestQueue.mutex };
+
+                m_requestQueue.requests.push_back(std::move(discardQuery));
+                m_requestQueue.requests.push_back(std::move(stopService));
+
+                lock.unlock();
+                m_requestQueue.condition.notify_one();
+            }
+            else if (requestId == 5 && type == L"stopped")
+            {
+                std::unique_lock lock { m_requestQueue.mutex };
+
+                m_requestQueue.shutdown = true;
+
+                lock.unlock();
+                m_requestQueue.condition.notify_one();
             }
         }
     }
 
     messageDeferral.Complete();
-}
-
-void App::OnServiceClosed(AppServiceConnection const& /*sender*/, AppServiceClosedEventArgs const& /*reason*/)
-{
-    ShutdownService();
-}
-
-void App::OnAppServicesCanceled(IBackgroundTaskInstance const& /*sender*/, BackgroundTaskCancellationReason const& /*reason*/)
-{
-    ShutdownService();
-}
-
-void App::ShutdownService()
-{
-    parsedId = -1;
-    results.clear();
-
-    m_backgroundTaskDeferral.Complete();
-    m_backgroundTaskDeferral = nullptr;
-    m_appServiceConnection = nullptr;
 }

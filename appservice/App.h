@@ -1,8 +1,39 @@
 ﻿#pragma once
 #include "App.xaml.g.h"
 
+#include <map>
+#include <mutex>
+#include <vector>
+
 namespace winrt::appservice::implementation
 {
+    struct RequestQueue
+    {
+        std::mutex mutex;
+        std::condition_variable condition;
+        std::vector<Windows::Data::Json::JsonObject> requests;
+        bool shutdown = false;
+    };
+
+    struct App;
+
+    struct ServiceConnection
+    {
+        explicit ServiceConnection(int connectionId, App& app);
+
+        void OnAppServicesCanceled(Windows::ApplicationModel::Background::IBackgroundTaskInstance const& sender, Windows::ApplicationModel::Background::BackgroundTaskCancellationReason const& reason);
+        void OnServiceClosed(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceClosedEventArgs const& reason);
+
+        const int m_connectionId;
+        App& m_app;
+
+        Windows::ApplicationModel::AppService::AppServiceConnection m_appServiceConnection { nullptr };
+        Windows::ApplicationModel::Background::BackgroundTaskDeferral m_backgroundTaskDeferral { nullptr };
+
+    private:
+        void ShutdownService();
+    };
+
     struct App : AppT<App>
     {
         App();
@@ -13,18 +44,15 @@ namespace winrt::appservice::implementation
 
         // App Service
         void OnBackgroundActivated(Windows::ApplicationModel::Activation::BackgroundActivatedEventArgs const&);
+        void OnServiceConnectionShutdown(int connectionId);
 
     private:
-        void OnAppServicesCanceled(Windows::ApplicationModel::Background::IBackgroundTaskInstance const& sender, Windows::ApplicationModel::Background::BackgroundTaskCancellationReason const& reason);
         Windows::Foundation::IAsyncAction OnRequestReceived(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceRequestReceivedEventArgs const& args);
-        void OnServiceClosed(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceClosedEventArgs const& reason);
-
-        void ShutdownService();
 
         int parsedId = -1;
         std::wstring results;
 
-        Windows::ApplicationModel::AppService::AppServiceConnection m_appServiceConnection { nullptr };
-        Windows::ApplicationModel::Background::BackgroundTaskDeferral m_backgroundTaskDeferral { nullptr };
+        RequestQueue m_requestQueue;
+        std::map<int, std::unique_ptr<ServiceConnection>> m_serviceConnections;
     };
 }

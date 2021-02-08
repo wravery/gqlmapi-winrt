@@ -6,9 +6,11 @@
 #include <windows.h>
 
 #include <array>
+#include <atomic>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <queue>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -25,61 +27,39 @@ using namespace Windows::Foundation::Collections;
 
 using namespace std::literals;
 
-class Service : public std::enable_shared_from_this<Service>
+struct SubscriptionPayloadQueue : std::enable_shared_from_this<SubscriptionPayloadQueue>
 {
-public:
-	explicit Service();
-	~Service();
+	explicit SubscriptionPayloadQueue() noexcept;
+	~SubscriptionPayloadQueue();
 
-	void run();
+	void sendResponse(JsonObject& response);
+	void Unsubscribe();
 
-private:
-	void startService(const JsonObject& request);
-	void stopService();
-	void parseQuery(const JsonObject& request, JsonObject& response);
-	void discardQuery(const JsonObject& request);
-	void fetchQuery(int requestId, const JsonObject& request, JsonObject& response);
-	void unsubscribe(const JsonObject& request);
+	int requestId = 0;
+	bool registered = false;
+	std::mutex mutex;
+	std::unique_ptr<std::thread> worker;
+	std::condition_variable condition;
+	std::queue<std::future<response::Value>> payloads;
+	std::optional<service::SubscriptionKey> key;
+	std::weak_ptr<service::Request> wpService;
 
-	void sendResponse(int requestId, JsonObject& response);
-	static JsonObject getPayloadData(std::future<response::Value>&& payload);
-	static std::string ConvertToUTF8(std::wstring_view value);
-	static std::wstring ConvertToUTF16(std::string_view value);
-
-	std::shared_ptr<service::Request> serviceSingleton;
-
-	std::mutex writeMutex;
 	AppServiceConnection serviceConnection;
-
-	std::map<int, peg::ast> queryMap;
-	std::map<int, service::SubscriptionKey> subscriptionMap;
 };
 
-Service::Service()
+SubscriptionPayloadQueue::SubscriptionPayloadQueue() noexcept
 {
 	serviceConnection.AppServiceName(L"gqlmapi");
 	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
-
-	auto status = serviceConnection.OpenAsync().get();
-
-	if (status != AppServiceConnectionStatus::Success)
-	{
-		std::ostringstream oss;
-
-		oss << "AppServiceConnection::OpenAsync failed: " << static_cast<int>(status);
-		throw std::runtime_error(oss.str());
-	}
 }
 
-Service::~Service()
+SubscriptionPayloadQueue::~SubscriptionPayloadQueue()
 {
-	serviceConnection.Close();
+	Unsubscribe();
 }
 
-void Service::sendResponse(int requestId, JsonObject& response)
+void SubscriptionPayloadQueue::sendResponse(JsonObject& response)
 {
-	std::lock_guard lock { writeMutex };
-
 	response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
 
 	ValueSet responseMessage;
@@ -90,6 +70,91 @@ void Service::sendResponse(int requestId, JsonObject& response)
 		}));
 
 	serviceConnection.SendMessageAsync(responseMessage).get();
+}
+
+void SubscriptionPayloadQueue::Unsubscribe()
+{
+	std::unique_lock<std::mutex> lock(mutex);
+
+	if (worker)
+	{
+		worker->join();
+		worker.reset();
+	}
+
+	if (!registered)
+	{
+		return;
+	}
+
+	registered = false;
+
+	auto deferUnsubscribe = std::move(key);
+	auto serviceSingleton = wpService.lock();
+
+	lock.unlock();
+	condition.notify_one();
+
+	if (deferUnsubscribe
+		&& serviceSingleton)
+	{
+		serviceSingleton->unsubscribe(std::launch::deferred, *deferUnsubscribe).get();
+	}
+}
+
+class Service : public implements<Service, IInspectable>
+{
+public:
+	explicit Service();
+	~Service();
+
+	IAsyncAction run();
+
+private:
+	void startService(const JsonObject& request);
+	void stopService(JsonObject& response);
+	void parseQuery(const JsonObject& request, JsonObject& response);
+	void discardQuery(const JsonObject& request);
+	IAsyncAction fetchQuery(int requestId, const JsonObject& request);
+	void unsubscribe(const JsonObject& request);
+
+	IAsyncAction sendResponse(int requestId, JsonObject& response);
+	static std::string ConvertToUTF8(std::wstring_view value);
+	static std::wstring ConvertToUTF16(std::string_view value);
+
+	std::shared_ptr<service::Request> serviceSingleton;
+
+	std::atomic_bool shutdown;
+
+	AppServiceConnection serviceConnection;
+
+	std::map<int, peg::ast> queryMap;
+	std::map<int, std::shared_ptr<SubscriptionPayloadQueue>> subscriptionMap;
+};
+
+Service::Service()
+{
+	serviceConnection.AppServiceName(L"gqlmapi");
+	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
+}
+
+Service::~Service()
+{
+	serviceConnection.Close();
+}
+
+IAsyncAction Service::sendResponse(int requestId, JsonObject& response)
+{
+	response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
+
+	ValueSet responseMessage;
+
+	responseMessage.Insert(L"command", PropertyValue::CreateString(L"send-responses"));
+	responseMessage.Insert(L"responses", PropertyValue::CreateStringArray({
+		response.ToString(),
+		}));
+
+	co_await serviceConnection.SendMessageAsync(responseMessage);
 }
 
 std::string Service::ConvertToUTF8(std::wstring_view value)
@@ -136,13 +201,23 @@ std::wstring Service::ConvertToUTF16(std::string_view value)
 	return result;
 }
 
-void Service::run()
+IAsyncAction Service::run()
 {
+	auto status = co_await serviceConnection.OpenAsync();
+
+	if (status != AppServiceConnectionStatus::Success)
+	{
+		std::ostringstream oss;
+
+		oss << "AppServiceConnection::OpenAsync failed: " << static_cast<int>(status);
+		throw std::runtime_error(oss.str());
+	}
+
 	ValueSet getRequests;
 
 	getRequests.Insert(L"command", PropertyValue::CreateString(L"get-requests"));
 
-	auto serviceResponse = serviceConnection.SendMessageAsync(getRequests).get();
+	auto serviceResponse = co_await serviceConnection.SendMessageAsync(getRequests);
 
 	while (serviceResponse.Status() == AppServiceResponseStatus::Success)
 	{
@@ -166,9 +241,9 @@ void Service::run()
 				}
 				else if (type == L"stopService")
 				{
-					stopService();
+					response = std::make_optional<JsonObject>();
+					stopService(*response);
 					stopped = true;
-					break;
 				}
 				else if (type == L"parseQuery")
 				{
@@ -181,8 +256,7 @@ void Service::run()
 				}
 				else if (type == L"fetchQuery")
 				{
-					response = std::make_optional<JsonObject>();
-					fetchQuery(requestId, requestObject, *response);
+					co_await fetchQuery(requestId, requestObject);
 				}
 				else if (type == L"unsubscribe")
 				{
@@ -205,7 +279,7 @@ void Service::run()
 
 			if (response)
 			{
-				sendResponse(requestId, *response);
+				co_await sendResponse(requestId, *response);
 			}
 		}
 
@@ -214,8 +288,10 @@ void Service::run()
 			break;
 		}
 
-		serviceResponse = serviceConnection.SendMessageAsync(getRequests).get();
+		serviceResponse = co_await serviceConnection.SendMessageAsync(getRequests);
 	}
+
+	co_return;
 }
 
 void Service::startService(const JsonObject& request)
@@ -223,19 +299,21 @@ void Service::startService(const JsonObject& request)
 	serviceSingleton = mapi::GetService(request.GetNamedBoolean(L"useDefaultProfile"));
 }
 
-void Service::stopService()
+void Service::stopService(JsonObject& response)
 {
 	if (serviceSingleton)
 	{
 		for (const auto& entry : subscriptionMap)
 		{
-			serviceSingleton->unsubscribe(std::launch::deferred, entry.second).get();
+			entry.second->Unsubscribe();
 		}
 
 		subscriptionMap.clear();
 		queryMap.clear();
 		serviceSingleton.reset();
 	}
+
+	response.SetNamedValue(L"type", JsonValue::CreateStringValue(L"stopped"));
 }
 
 void Service::parseQuery(const JsonObject& request, JsonObject& response)
@@ -253,34 +331,7 @@ void Service::discardQuery(const JsonObject& request)
 	queryMap.erase(static_cast<int>(request.GetNamedNumber(L"queryId")));
 }
 
-JsonObject Service::getPayloadData(std::future<response::Value>&& payload)
-{
-	response::Value document { response::Type::Map };
-
-	try
-	{
-		document = payload.get();
-	}
-	catch (service::schema_exception& scx)
-	{
-		document.reserve(2);
-		document.emplace_back(std::string { service::strData }, {});
-		document.emplace_back(std::string { service::strErrors }, scx.getErrors());
-	}
-	catch (const std::exception& ex)
-	{
-		std::ostringstream oss;
-
-		oss << "Caught exception delivering subscription payload: " << ex.what();
-		document.reserve(2);
-		document.emplace_back(std::string { service::strData }, {});
-		document.emplace_back(std::string { service::strErrors }, response::Value { oss.str() });
-	}
-
-	return JsonObject::Parse(ConvertToUTF16(response::toJSON(std::move(document))));
-}
-
-void Service::fetchQuery(int requestId, const JsonObject& request, JsonObject& response)
+IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 {
 	const auto queryId = static_cast<int>(request.GetNamedNumber(L"queryId"));
 	const auto itrQuery = queryMap.find(queryId);
@@ -300,48 +351,125 @@ void Service::fetchQuery(int requestId, const JsonObject& request, JsonObject& r
 		? response::parseJSON(ConvertToUTF8(request.GetNamedObject(variablesKey).ToString()))
 		: response::Value(response::Type::Map));
 
-	if (serviceSingleton->findOperationDefinition(ast, operationName).first
-		== service::strSubscription)
+	auto payloadQueue = std::make_shared<SubscriptionPayloadQueue>();
+
+	co_await payloadQueue->serviceConnection.OpenAsync();
+
+	std::unique_lock lock { payloadQueue->mutex };
+
+	payloadQueue->requestId = requestId;
+	payloadQueue->worker = std::make_unique<std::thread>([payloadQueue]()
+	{
+		bool registered = true;
+
+		while (registered)
+		{
+			std::unique_lock<std::mutex> lock(payloadQueue->mutex);
+
+			payloadQueue->condition.wait(lock, [payloadQueue]() noexcept -> bool
+			{
+				return !payloadQueue->registered
+					|| !payloadQueue->payloads.empty();
+			});
+
+			auto payloads = std::move(payloadQueue->payloads);
+
+			registered = payloadQueue->registered;
+			lock.unlock();
+
+			std::vector<std::string> json;
+
+			while (!payloads.empty())
+			{
+				response::Value document { response::Type::Map };
+				auto payload = std::move(payloads.front());
+
+				payloads.pop();
+
+				try
+				{
+					document = payload.get();
+				}
+				catch (service::schema_exception& scx)
+				{
+					document.reserve(2);
+					document.emplace_back(std::string { service::strData }, {});
+					document.emplace_back(std::string { service::strErrors }, scx.getErrors());
+				}
+				catch (const std::exception& ex)
+				{
+					std::ostringstream oss;
+
+					oss << "Caught exception delivering subscription payload: " << ex.what();
+					document.reserve(2);
+					document.emplace_back(std::string { service::strData }, {});
+					document.emplace_back(std::string { service::strErrors }, response::Value { oss.str() });
+				}
+
+				json.push_back(response::toJSON(std::move(document)));
+			}
+
+			for (const auto& data : json)
+			{
+				JsonObject next;
+
+				next.SetNamedValue(L"type", JsonValue::CreateStringValue(L"next"));
+				next.SetNamedValue(L"data", JsonObject::Parse(ConvertToUTF16(data)));
+
+				payloadQueue->sendResponse(next);
+			}
+		}
+
+		JsonObject complete;
+
+		complete.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
+
+		payloadQueue->sendResponse(complete);
+		payloadQueue->serviceConnection.Close();
+	});
+
+	if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
 	{
 		if (subscriptionMap.find(queryId) != subscriptionMap.end())
 		{
 			throw std::runtime_error("Duplicate subscription");
 		}
 
-		subscriptionMap[queryId] =
-			serviceSingleton
-			->subscribe(std::launch::deferred,
-				service::SubscriptionParams { nullptr,
-					peg::ast { ast },
-					std::move(operationName),
-					std::move(parsedVariables) },
-				[wpThis = std::weak_ptr<Service> { shared_from_this() },
-				requestId](std::future<response::Value> payload) noexcept -> void {
-			auto spThis = wpThis.lock();
+		payloadQueue->registered = true;
+		payloadQueue->key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
+			service::SubscriptionParams { nullptr,
+				peg::ast { ast },
+				std::move(operationName),
+				std::move(parsedVariables) },
+			[payloadQueue](std::future<response::Value> payload) noexcept -> void
+		{
+			std::unique_lock lock { payloadQueue->mutex };
 
-			if (!spThis)
+			if (!payloadQueue->registered)
 			{
 				return;
 			}
+			payloadQueue->payloads.push(std::move(payload));
 
-			JsonObject next;
-
-			next.SetNamedValue(L"type", JsonValue::CreateStringValue(L"next"));
-			next.SetNamedValue(L"data", getPayloadData(std::move(payload)));
-
-			spThis->sendResponse(requestId, next);
-		}).get();
+			lock.unlock();
+			payloadQueue->condition.notify_one();
+		}).get());
 	}
 	else
 	{
-		response.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
-		response.SetNamedValue(L"data",
-			getPayloadData(serviceSingleton->resolve(std::launch::deferred,
-				nullptr,
-				ast,
-				operationName,
-				std::move(parsedVariables))));
+		payloadQueue->payloads.push(serviceSingleton->resolve(std::launch::deferred,
+			nullptr,
+			ast,
+			operationName,
+			std::move(parsedVariables)));
+
+		lock.unlock();
+		payloadQueue->condition.notify_one();
 	}
+
+	subscriptionMap[queryId] = std::move(payloadQueue);
+
+	co_return;
 }
 
 void Service::unsubscribe(const JsonObject& request)
@@ -350,11 +478,7 @@ void Service::unsubscribe(const JsonObject& request)
 
 	if (itr != subscriptionMap.end())
 	{
-		if (serviceSingleton)
-		{
-			serviceSingleton->unsubscribe(std::launch::deferred, itr->second).get();
-		}
-
+		itr->second->Unsubscribe();
 		subscriptionMap.erase(itr);
 	}
 }
@@ -365,7 +489,9 @@ int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINST
 
 	try
 	{
-		std::make_shared<Service>()->run();
+		Service service;
+
+		service.run().get();
 	}
 	catch (const std::exception& e)
 	{
