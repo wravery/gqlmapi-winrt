@@ -45,6 +45,14 @@
       <Platform>AnyCPU</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <PropertyGroup Label="Configuration">
+    <PreBuildEvent>
+      cd $(ProjectDir)
+      echo Copying "$(SolutionDir)packages\gqlmapi.1.0.0\bin\*" to "$(SolutionDir)gqlmapi-winrt\bridge"
+      if not exist "$(SolutionDir)gqlmapi-winrt\bridge" mkdir "$(SolutionDir)gqlmapi-winrt\bridge"
+      copy "$(SolutionDir)packages\gqlmapi.1.0.0\bin\*" "$(SolutionDir)gqlmapi-winrt\bridge\"
+    </PreBuildEvent>
+  </PropertyGroup>
   <PropertyGroup>
     <WapProjPath Condition="'$(WapProjPath)'==''">$(MSBuildExtensionsPath)\Microsoft\DesktopBridge\</WapProjPath>
   </PropertyGroup>
