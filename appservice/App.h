@@ -7,11 +7,11 @@
 
 namespace winrt::appservice::implementation
 {
-    struct RequestQueue
+    struct PayloadQueue
     {
         std::mutex mutex;
         std::condition_variable condition;
-        std::vector<Windows::Data::Json::JsonObject> requests;
+        std::vector<Windows::Data::Json::JsonObject> payloads;
         bool shutdown = false;
     };
 
@@ -52,7 +52,8 @@ namespace winrt::appservice::implementation
         int parsedId = -1;
         std::wstring results;
 
-        RequestQueue m_requestQueue;
+        PayloadQueue m_requestQueue;
+        PayloadQueue m_responseQueue;
         std::map<int, std::unique_ptr<ServiceConnection>> m_serviceConnections;
     };
 }
