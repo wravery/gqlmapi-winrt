@@ -68,7 +68,7 @@ StyleCopReport.xml
 *.obj
 *.iobj
 *.pch
-# *.pdb
+*.pdb
 *.ipdb
 *.pgc
 *.pgd
@@ -338,3 +338,6 @@ ASALocalRun/
 
 # BeatPulse healthcheck temp database
 healthchecksdb
+
+# Files deployed from NuGet packages
+/gqlmapi-winrt/bridge/
