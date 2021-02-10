@@ -17,7 +17,7 @@ namespace winrt::clientlib::implementation {
 Connection::Connection(bool useDefaultProfile)
 	: m_useDefaultProfile { useDefaultProfile }
 {
-	m_serviceConnection.AppServiceName(L"gqlmapi");
+	m_serviceConnection.AppServiceName(L"gqlmapi.client");
 	m_serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
 }
 

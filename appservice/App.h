@@ -47,7 +47,8 @@ namespace winrt::appservice::implementation
         void OnServiceConnectionShutdown(int connectionId);
 
     private:
-        Windows::Foundation::IAsyncAction OnRequestReceived(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceRequestReceivedEventArgs const& args);
+        Windows::Foundation::IAsyncAction OnClientRequestReceived(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceRequestReceivedEventArgs const& args);
+        Windows::Foundation::IAsyncAction OnBridgeResponseReceived(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceRequestReceivedEventArgs const& args);
 
         int parsedId = -1;
         std::wstring results;

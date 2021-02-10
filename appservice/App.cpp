@@ -172,9 +172,19 @@ void App::OnBackgroundActivated(BackgroundActivatedEventArgs const& e)
     taskInstance.Canceled({ serviceConnection, &ServiceConnection::OnAppServicesCanceled });
 
     serviceConnection->m_appServiceConnection = appServiceTrigger.AppServiceConnection();
-    serviceConnection->m_appServiceConnection.RequestReceived({ this, &App::OnRequestReceived });
-    serviceConnection->m_appServiceConnection.ServiceClosed({ serviceConnection, &ServiceConnection::OnServiceClosed });
 
+    const auto appServiceName = serviceConnection->m_appServiceConnection.AppServiceName();
+
+    if (appServiceName == L"gqlmapi.client")
+    {
+        serviceConnection->m_appServiceConnection.RequestReceived({ this, &App::OnClientRequestReceived });
+    }
+    else if (appServiceName == L"gqlmapi.bridge")
+    {
+        serviceConnection->m_appServiceConnection.RequestReceived({ this, &App::OnBridgeResponseReceived });
+    }
+ 
+    serviceConnection->m_appServiceConnection.ServiceClosed({ serviceConnection, &ServiceConnection::OnServiceClosed });
 }
 
 void App::OnServiceConnectionShutdown(int connectionId)
@@ -182,7 +192,7 @@ void App::OnServiceConnectionShutdown(int connectionId)
     m_serviceConnections.erase(connectionId);
 }
 
-IAsyncAction App::OnRequestReceived(AppServiceConnection const& /*sender*/, AppServiceRequestReceivedEventArgs const& args)
+IAsyncAction App::OnClientRequestReceived(AppServiceConnection const& /*sender*/, AppServiceRequestReceivedEventArgs const& args)
 {
     auto messageDeferral = args.GetDeferral();
     auto messageRequest = args.Request();
@@ -212,7 +222,68 @@ IAsyncAction App::OnRequestReceived(AppServiceConnection const& /*sender*/, AppS
             m_requestQueue.condition.notify_one();
         }
     }
-    else if (command == L"get-requests")
+    else if (command == L"get-responses")
+    {
+        apartment_context callingThread;
+
+        co_await resume_background();
+
+        std::unique_lock lock { m_responseQueue.mutex };
+
+        m_responseQueue.condition.wait(lock, [this]() noexcept
+        {
+            return m_responseQueue.shutdown
+                || !m_responseQueue.payloads.empty();
+        });
+
+        com_array<hstring> responses(static_cast<com_array<hstring>::size_type>(m_responseQueue.payloads.size()));
+
+        std::transform(m_responseQueue.payloads.begin(), m_responseQueue.payloads.end(), responses.begin(),
+            [](const JsonObject& response) -> hstring
+        {
+            return response.ToString();
+        });
+
+        if (!m_responseQueue.shutdown)
+        {
+            const auto itr = std::find_if(m_responseQueue.payloads.begin(), m_responseQueue.payloads.end(),
+                [](JsonObject& response)
+            {
+                const auto type = response.GetNamedString(L"type");
+
+                return (type == L"stopped");
+            });
+
+            if (itr != m_responseQueue.payloads.end())
+            {
+                m_responseQueue.shutdown = true;
+            }
+        }
+
+        m_responseQueue.payloads.clear();
+        lock.unlock();
+
+        co_await callingThread;
+
+        ValueSet returnValue;
+
+        returnValue.Insert(L"responses", PropertyValue::CreateStringArray(responses));
+
+        co_await messageRequest.SendResponseAsync(returnValue);
+    }
+
+    messageDeferral.Complete();
+}
+
+IAsyncAction App::OnBridgeResponseReceived(AppServiceConnection const& /*sender*/, AppServiceRequestReceivedEventArgs const& args)
+{
+    auto messageDeferral = args.GetDeferral();
+    auto messageRequest = args.Request();
+    auto message = messageRequest.Message();
+    const auto messageCommand = message.Lookup(L"command").as<hstring>();
+    const std::wstring_view command { messageCommand };
+
+    if (command == L"get-requests")
     {
         apartment_context callingThread;
 
@@ -286,55 +357,6 @@ IAsyncAction App::OnRequestReceived(AppServiceConnection const& /*sender*/, AppS
                 m_requestQueue.condition.notify_one();
             }
         }
-    }
-    else if (command == L"get-responses")
-    {
-        apartment_context callingThread;
-
-        co_await resume_background();
-
-        std::unique_lock lock { m_responseQueue.mutex };
-
-        m_responseQueue.condition.wait(lock, [this]() noexcept
-        {
-            return m_responseQueue.shutdown
-                || !m_responseQueue.payloads.empty();
-        });
-
-        com_array<hstring> responses(static_cast<com_array<hstring>::size_type>(m_responseQueue.payloads.size()));
-
-        std::transform(m_responseQueue.payloads.begin(), m_responseQueue.payloads.end(), responses.begin(),
-            [](const JsonObject& response) -> hstring
-        {
-            return response.ToString();
-        });
-
-        if (!m_responseQueue.shutdown)
-        {
-            const auto itr = std::find_if(m_responseQueue.payloads.begin(), m_responseQueue.payloads.end(),
-                [](JsonObject& response)
-            {
-                const auto type = response.GetNamedString(L"type");
-
-                return (type == L"stopped");
-            });
-
-            if (itr != m_responseQueue.payloads.end())
-            {
-                m_responseQueue.shutdown = true;
-            }
-        }
-
-        m_responseQueue.payloads.clear();
-        lock.unlock();
-
-        co_await callingThread;
-
-        ValueSet returnValue;
-
-        returnValue.Insert(L"responses", PropertyValue::CreateStringArray(responses));
-
-        co_await messageRequest.SendResponseAsync(returnValue);
     }
 
     messageDeferral.Complete();
