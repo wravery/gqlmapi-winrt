@@ -11,7 +11,7 @@ namespace winrt::appservice::implementation
         int32_t MyProperty();
         void MyProperty(int32_t value);
 
-        Windows::Foundation::IAsyncAction ClickHandler(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        fire_and_forget ClickHandler(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
     };
 }
 

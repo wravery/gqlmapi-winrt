@@ -7,7 +7,13 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-        <Button x:Name="myButton" Click="ClickHandler">Click Me</Button>
-    </StackPanel>
+    <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Padding="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Button x:Name="myButton" Click="ClickHandler" HorizontalAlignment="Left" Grid.Row="0">Click Me</Button>
+        <TextBox x:Name="queryResults" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" Grid.Row="1" Text="Query Results go here!" IsReadOnly="True" TextWrapping="Wrap"></TextBox>
+    </Grid>
 </Page>

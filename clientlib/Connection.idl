@@ -1,0 +1,22 @@
+namespace clientlib
+{
+    delegate void ParsedHandler(Int32 queryId);
+    delegate void FetchedHandler(String fetched);
+    delegate void CompleteHandler();
+    delegate void ErrorHandler(String message);
+
+    [default_interface]
+    runtimeclass Connection
+    {
+        Connection(Boolean useDefaultProfile);
+        Windows.Foundation.IAsyncOperation<Boolean> Shutdown(ErrorHandler onError);
+
+        Windows.Foundation.IAsyncOperation<Boolean> ParseQuery(String query,
+            ParsedHandler onParsed, ErrorHandler onError);
+        Windows.Foundation.IAsyncOperation<Boolean> DiscardQuery(Int32 queryId);
+
+        Windows.Foundation.IAsyncOperation<Boolean> FetchQuery(Int32 queryId, String operationName, Windows.Data.Json.JsonObject variables,
+            FetchedHandler onFetched, CompleteHandler onComplete, ErrorHandler onError);
+        Windows.Foundation.IAsyncOperation<Boolean> Unsubscribe(Int32 queryId);
+    }
+}
