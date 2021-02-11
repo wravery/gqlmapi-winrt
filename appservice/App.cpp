@@ -127,19 +127,20 @@ void App::OnNavigationFailed(IInspectable const&, NavigationFailedEventArgs cons
 ServiceConnection::ServiceConnection(
     const AppServiceConnection& appServiceConnection,
     const BackgroundTaskDeferral& backgroundTaskDeferral,
-    const ServiceRequestHandler& onResponse)
+    const ServiceRequestHandler& onResponse, const ServiceShutdownHandler& onShutdown)
     : m_appServiceConnection { appServiceConnection }
     , m_backgroundTaskDeferral { backgroundTaskDeferral }
     , m_onResponse { onResponse }
+    , m_onShutdown { onShutdown }
 {
 }
 
-IAsyncOperation<bool> ServiceConnection::SendRequestAsync(const ValueSet& message)
+fire_and_forget ServiceConnection::SendRequestAsync(const ValueSet& message)
 {
-    const auto messageResult = co_await m_appServiceConnection.SendMessageAsync(message);
-    const auto messageStatus = messageResult.Status();
-
-    co_return messageStatus == AppServiceResponseStatus::Success;
+    if (m_appServiceConnection)
+    {
+        co_await m_appServiceConnection.SendMessageAsync(message);
+    }
 }
 
 IAsyncAction ServiceConnection::OnRequestReceived(const AppServiceConnection& /* sender */, const AppServiceRequestReceivedEventArgs& args)
@@ -174,6 +175,9 @@ void ServiceConnection::ShutdownService()
     m_backgroundTaskDeferral = nullptr;
     m_appServiceConnection = nullptr;
     m_onResponse = nullptr;
+
+    m_onShutdown();
+    m_onShutdown = nullptr;
 }
 
 void App::OnBackgroundActivated(BackgroundActivatedEventArgs const& e)
@@ -184,17 +188,20 @@ void App::OnBackgroundActivated(BackgroundActivatedEventArgs const& e)
     const auto appServiceConnection = appServiceTrigger.AppServiceConnection();
     const auto appServiceName = appServiceConnection.AppServiceName();
     ServiceRequestHandler onRequest { nullptr };
+    ServiceShutdownHandler onShutdown { nullptr };
 
     if (appServiceName == L"gqlmapi.client")
     {
         onRequest = { this, &App::OnClientRequestReceived };
+        onShutdown = { this, &App::OnClientShutdown };
     }
     else if (appServiceName == L"gqlmapi.bridge")
     {
         onRequest = { this, &App::OnBridgeResponseReceived };
+        onShutdown = { this, &App::OnBridgeShutdown };
     }
 
-    auto serviceConnection = std::make_unique<ServiceConnection>(appServiceConnection, taskDeferral, onRequest);
+    auto serviceConnection = make_self<ServiceConnection>(appServiceConnection, taskDeferral, onRequest, onShutdown);
 
     taskInstance.Canceled({ serviceConnection.get(), &ServiceConnection::OnAppServicesCanceled });
     appServiceConnection.ServiceClosed({ serviceConnection.get(), &ServiceConnection::OnServiceClosed });
@@ -202,30 +209,52 @@ void App::OnBackgroundActivated(BackgroundActivatedEventArgs const& e)
 
     if (appServiceName == L"gqlmapi.client")
     {
-        m_clientConnection = std::move(serviceConnection);
+        m_clientConnection = serviceConnection;
     }
     else if (appServiceName == L"gqlmapi.bridge")
     {
-        m_bridgeConnection = std::move(serviceConnection);
+        if (!m_bridgeQueue.empty())
+        {
+            auto messages = std::move(m_bridgeQueue);
+
+            for (const auto& message : messages)
+            {
+                serviceConnection->SendRequestAsync(message);
+            }
+        }
+
+        m_bridgeConnection = serviceConnection;
     }
 }
 
-IAsyncOperation<bool> App::OnClientRequestReceived(const ValueSet& message)
+IAsyncAction App::OnClientRequestReceived(const ValueSet& message)
 {
     if (!m_bridgeConnection)
     {
-        co_return false;
+        m_bridgeQueue.emplace_back(message);
+        co_return;
     }
 
-    co_return co_await m_bridgeConnection->SendRequestAsync(message);
+    m_bridgeConnection->SendRequestAsync(message);
 }
 
-IAsyncOperation<bool> App::OnBridgeResponseReceived(const ValueSet& message)
+IAsyncAction App::OnBridgeResponseReceived(const ValueSet& message)
 {
     if (!m_clientConnection)
     {
-        co_return false;
+        co_return;
     }
 
-    co_return co_await  m_clientConnection->SendRequestAsync(message);
+    m_clientConnection->SendRequestAsync(message);
+}
+
+void App::OnClientShutdown()
+{
+    m_clientConnection = nullptr;
+}
+
+void App::OnBridgeShutdown()
+{
+    m_bridgeConnection = nullptr;
+    m_bridgeQueue.clear();
 }

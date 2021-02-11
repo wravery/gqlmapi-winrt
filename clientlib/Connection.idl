@@ -1,7 +1,8 @@
 namespace clientlib
 {
+    delegate void StoppedHandler();
     delegate void ParsedHandler(Int32 queryId);
-    delegate void FetchedHandler(String fetched);
+    delegate void FetchedHandler(Windows.Data.Json.JsonObject fetched);
     delegate void CompleteHandler();
     delegate void ErrorHandler(String message);
 
@@ -9,7 +10,8 @@ namespace clientlib
     runtimeclass Connection
     {
         Connection(Boolean useDefaultProfile);
-        Windows.Foundation.IAsyncOperation<Boolean> Shutdown(ErrorHandler onError);
+        Windows.Foundation.IAsyncOperation<Boolean> Shutdown(
+            StoppedHandler onStopped, ErrorHandler onError);
 
         Windows.Foundation.IAsyncOperation<Boolean> ParseQuery(String query,
             ParsedHandler onParsed, ErrorHandler onError);
