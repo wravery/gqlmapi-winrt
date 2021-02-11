@@ -124,10 +124,38 @@ void App::OnNavigationFailed(IInspectable const&, NavigationFailedEventArgs cons
     throw hresult_error(E_FAIL, hstring(L"Failed to load Page ") + e.SourcePageType().Name);
 }
 
-ServiceConnection::ServiceConnection(int connectionId, App& app)
-    : m_connectionId { connectionId }
-    , m_app { app }
+ServiceConnection::ServiceConnection(
+    const AppServiceConnection& appServiceConnection,
+    const BackgroundTaskDeferral& backgroundTaskDeferral,
+    const ServiceRequestHandler& onResponse)
+    : m_appServiceConnection { appServiceConnection }
+    , m_backgroundTaskDeferral { backgroundTaskDeferral }
+    , m_onResponse { onResponse }
 {
+}
+
+IAsyncOperation<bool> ServiceConnection::SendRequestAsync(const ValueSet& message)
+{
+    const auto messageResult = co_await m_appServiceConnection.SendMessageAsync(message);
+    const auto messageStatus = messageResult.Status();
+
+    co_return messageStatus == AppServiceResponseStatus::Success;
+}
+
+IAsyncAction ServiceConnection::OnRequestReceived(const AppServiceConnection& /* sender */, const AppServiceRequestReceivedEventArgs& args)
+{
+    if (!m_onResponse)
+    {
+        co_return;
+    }
+
+    const auto messageDeferral = args.GetDeferral();
+    const auto messageRequest = args.Request();
+    const auto message = messageRequest.Message();
+
+    co_await m_onResponse(message);
+
+    messageDeferral.Complete();
 }
 
 void ServiceConnection::OnAppServicesCanceled(IBackgroundTaskInstance const& /*sender*/, BackgroundTaskCancellationReason const& /*reason*/)
@@ -145,219 +173,59 @@ void ServiceConnection::ShutdownService()
     m_backgroundTaskDeferral.Complete();
     m_backgroundTaskDeferral = nullptr;
     m_appServiceConnection = nullptr;
-
-    m_app.OnServiceConnectionShutdown(m_connectionId);
+    m_onResponse = nullptr;
 }
 
 void App::OnBackgroundActivated(BackgroundActivatedEventArgs const& e)
 {
     auto taskInstance = e.TaskInstance();
-    auto appServiceTrigger = taskInstance.TriggerDetails().as<AppServiceTriggerDetails>();
     auto taskDeferral = taskInstance.GetDeferral();
-
-    if (m_requestQueue.shutdown)
-    {
-        taskDeferral.Complete();
-        return;
-    }
-
-    const int lastConnectionId = m_serviceConnections.empty() ? 0 : m_serviceConnections.crbegin()->first;
-    const int nextConnectionId = lastConnectionId + 1;
-
-    m_serviceConnections[nextConnectionId] = std::make_unique<ServiceConnection>(nextConnectionId, *this);
-
-    auto serviceConnection = m_serviceConnections[nextConnectionId].get();
-
-    serviceConnection->m_backgroundTaskDeferral = taskDeferral;
-    taskInstance.Canceled({ serviceConnection, &ServiceConnection::OnAppServicesCanceled });
-
-    serviceConnection->m_appServiceConnection = appServiceTrigger.AppServiceConnection();
-
-    const auto appServiceName = serviceConnection->m_appServiceConnection.AppServiceName();
+    auto appServiceTrigger = taskInstance.TriggerDetails().as<AppServiceTriggerDetails>();
+    const auto appServiceConnection = appServiceTrigger.AppServiceConnection();
+    const auto appServiceName = appServiceConnection.AppServiceName();
+    ServiceRequestHandler onRequest { nullptr };
 
     if (appServiceName == L"gqlmapi.client")
     {
-        serviceConnection->m_appServiceConnection.RequestReceived({ this, &App::OnClientRequestReceived });
+        onRequest = { this, &App::OnClientRequestReceived };
     }
     else if (appServiceName == L"gqlmapi.bridge")
     {
-        serviceConnection->m_appServiceConnection.RequestReceived({ this, &App::OnBridgeResponseReceived });
+        onRequest = { this, &App::OnBridgeResponseReceived };
     }
- 
-    serviceConnection->m_appServiceConnection.ServiceClosed({ serviceConnection, &ServiceConnection::OnServiceClosed });
+
+    auto serviceConnection = std::make_unique<ServiceConnection>(appServiceConnection, taskDeferral, onRequest);
+
+    taskInstance.Canceled({ serviceConnection.get(), &ServiceConnection::OnAppServicesCanceled });
+    appServiceConnection.ServiceClosed({ serviceConnection.get(), &ServiceConnection::OnServiceClosed });
+    appServiceConnection.RequestReceived({ serviceConnection.get(), &ServiceConnection::OnRequestReceived });
+
+    if (appServiceName == L"gqlmapi.client")
+    {
+        m_clientConnection = std::move(serviceConnection);
+    }
+    else if (appServiceName == L"gqlmapi.bridge")
+    {
+        m_bridgeConnection = std::move(serviceConnection);
+    }
 }
 
-void App::OnServiceConnectionShutdown(int connectionId)
+IAsyncOperation<bool> App::OnClientRequestReceived(const ValueSet& message)
 {
-    m_serviceConnections.erase(connectionId);
+    if (!m_bridgeConnection)
+    {
+        co_return false;
+    }
+
+    co_return co_await m_bridgeConnection->SendRequestAsync(message);
 }
 
-IAsyncAction App::OnClientRequestReceived(AppServiceConnection const& /*sender*/, AppServiceRequestReceivedEventArgs const& args)
+IAsyncOperation<bool> App::OnBridgeResponseReceived(const ValueSet& message)
 {
-    auto messageDeferral = args.GetDeferral();
-    auto messageRequest = args.Request();
-    auto message = messageRequest.Message();
-    const auto messageCommand = message.Lookup(L"command").as<hstring>();
-    const std::wstring_view command { messageCommand };
-
-    if (command == L"queue-requests")
+    if (!m_clientConnection)
     {
-        com_array<hstring> requests;
-
-        message.Lookup(L"requests").as<IPropertyValue>().GetStringArray(requests);
-
-        if (!requests.empty())
-        {
-            std::unique_lock lock { m_requestQueue.mutex };
-
-            if (!m_requestQueue.shutdown)
-            {
-                for (const auto& request : requests)
-                {
-                    m_requestQueue.payloads.push_back(JsonObject::Parse(request));
-                }
-            }
-
-            lock.unlock();
-            m_requestQueue.condition.notify_one();
-        }
-    }
-    else if (command == L"get-responses")
-    {
-        apartment_context callingThread;
-
-        co_await resume_background();
-
-        std::unique_lock lock { m_responseQueue.mutex };
-
-        m_responseQueue.condition.wait(lock, [this]() noexcept
-        {
-            return m_responseQueue.shutdown
-                || !m_responseQueue.payloads.empty();
-        });
-
-        com_array<hstring> responses(static_cast<com_array<hstring>::size_type>(m_responseQueue.payloads.size()));
-
-        std::transform(m_responseQueue.payloads.begin(), m_responseQueue.payloads.end(), responses.begin(),
-            [](const JsonObject& response) -> hstring
-        {
-            return response.ToString();
-        });
-
-        if (!m_responseQueue.shutdown)
-        {
-            const auto itr = std::find_if(m_responseQueue.payloads.begin(), m_responseQueue.payloads.end(),
-                [](JsonObject& response)
-            {
-                const auto type = response.GetNamedString(L"type");
-
-                return (type == L"stopped");
-            });
-
-            if (itr != m_responseQueue.payloads.end())
-            {
-                m_responseQueue.shutdown = true;
-            }
-        }
-
-        m_responseQueue.payloads.clear();
-        lock.unlock();
-
-        co_await callingThread;
-
-        ValueSet returnValue;
-
-        returnValue.Insert(L"responses", PropertyValue::CreateStringArray(responses));
-
-        co_await messageRequest.SendResponseAsync(returnValue);
+        co_return false;
     }
 
-    messageDeferral.Complete();
-}
-
-IAsyncAction App::OnBridgeResponseReceived(AppServiceConnection const& /*sender*/, AppServiceRequestReceivedEventArgs const& args)
-{
-    auto messageDeferral = args.GetDeferral();
-    auto messageRequest = args.Request();
-    auto message = messageRequest.Message();
-    const auto messageCommand = message.Lookup(L"command").as<hstring>();
-    const std::wstring_view command { messageCommand };
-
-    if (command == L"get-requests")
-    {
-        apartment_context callingThread;
-
-        co_await resume_background();
-
-        std::unique_lock lock { m_requestQueue.mutex };
-
-        m_requestQueue.condition.wait(lock, [this]() noexcept
-        {
-            return m_requestQueue.shutdown
-                || !m_requestQueue.payloads.empty();
-        });
-
-        com_array<hstring> requests(static_cast<com_array<hstring>::size_type>(m_requestQueue.payloads.size()));
-
-        std::transform(m_requestQueue.payloads.begin(), m_requestQueue.payloads.end(), requests.begin(),
-            [](const JsonObject& request) -> hstring
-        {
-            return request.ToString();
-        });
-
-        m_requestQueue.payloads.clear();
-        lock.unlock();
-
-        co_await callingThread;
-
-        ValueSet returnValue;
-
-        returnValue.Insert(L"requests", PropertyValue::CreateStringArray(requests));
-
-        co_await messageRequest.SendResponseAsync(returnValue);
-    }
-    else if (command == L"send-responses")
-    {
-        com_array<hstring> responses;
-
-        message.Lookup(L"responses").as<IPropertyValue>().GetStringArray(responses);
-
-        if (!responses.empty())
-        {
-            bool stopped = false;
-            std::unique_lock responseLock { m_responseQueue.mutex };
-
-            if (!m_responseQueue.shutdown)
-            {
-                for (const auto& response : responses)
-                {
-                    auto responseObject = JsonObject::Parse(response);
-
-                    if (!stopped)
-                    {
-                        const auto type = responseObject.GetNamedString(L"type");
-
-                        stopped = (type == L"stopped");
-                    }
-
-                    m_responseQueue.payloads.push_back(std::move(responseObject));
-                }
-            }
-
-            responseLock.unlock();
-            m_responseQueue.condition.notify_one();
-
-            if (stopped)
-            {
-                std::unique_lock requestLock { m_requestQueue.mutex };
-
-                m_requestQueue.shutdown = true;
-
-                requestLock.unlock();
-                m_requestQueue.condition.notify_one();
-            }
-        }
-    }
-
-    messageDeferral.Complete();
+    co_return co_await  m_clientConnection->SendRequestAsync(message);
 }

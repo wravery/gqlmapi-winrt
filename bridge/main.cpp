@@ -118,6 +118,8 @@ private:
 	IAsyncAction fetchQuery(int requestId, const JsonObject& request);
 	void unsubscribe(const JsonObject& request);
 
+	IAsyncAction onRequestReceived(const AppServiceConnection& sender , const AppServiceRequestReceivedEventArgs& args);
+
 	IAsyncAction sendResponse(int requestId, JsonObject& response);
 	static std::string ConvertToUTF8(std::wstring_view value);
 	static std::wstring ConvertToUTF16(std::string_view value);
@@ -213,6 +215,7 @@ IAsyncAction Service::run()
 		throw std::runtime_error(oss.str());
 	}
 
+	serviceConnection.RequestReceived({ this, &Service::onRequestReceived });
 	ValueSet getRequests;
 
 	getRequests.Insert(L"command", PropertyValue::CreateString(L"get-requests"));
@@ -481,6 +484,18 @@ void Service::unsubscribe(const JsonObject& request)
 		itr->second->Unsubscribe();
 		subscriptionMap.erase(itr);
 	}
+}
+
+IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */, const AppServiceRequestReceivedEventArgs& args)
+{
+	const auto messageDeferral = args.GetDeferral();
+	const auto messageRequest = args.Request();
+	const auto message = messageRequest.Message();
+
+
+
+	messageDeferral.Complete();
+	co_return;
 }
 
 int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] PWSTR pCmdLine, [[maybe_unused]] int nCmdShow)

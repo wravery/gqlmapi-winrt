@@ -1,3 +1,4 @@
 namespace appservice
 {
+    delegate Windows.Foundation.IAsyncOperation<Boolean> ServiceRequestHandler(Windows.Foundation.Collections.ValueSet message);
 }
