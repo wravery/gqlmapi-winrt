@@ -15,6 +15,8 @@ using namespace Windows::UI;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Media;
 
+using namespace std::literals;
+
 namespace winrt::appservice::implementation {
 
 MainPage::MainPage()
@@ -35,12 +37,16 @@ void MainPage::MyProperty(int32_t /* value */)
 fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs const&)
 {
 	myButton().Content(box_value(L"Clicked"));
+	queryResults().Text(L"Loading...");
+
+	co_await resume_background();
 
 	Connection connection { true };
+	handle complete { CreateEventW(nullptr, false, false, nullptr) };
 	std::int32_t parsedId = -1;
-	hstring error;
+	std::optional<hstring> error;
 
-	if (!co_await connection.ParseQuery(LR"gql(query {
+	co_await connection.ParseQuery(LR"gql(query {
 		__schema {
 			queryType {
 				name
@@ -57,63 +63,89 @@ fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs cons
 			}
 		}
 	})gql",
-		[&parsedId](std::int32_t queryId)
+		[&parsedId, &complete](std::int32_t queryId)
 	{
 		parsedId = queryId;
-	}, [&error](const hstring& message)
+		SetEvent(complete.get());
+	}, [&error, &complete](const hstring& message)
 	{
-		error = message;
-	}))
-	{
-		std::wostringstream oss;
+		error = std::make_optional(message);
+		SetEvent(complete.get());
+	});
 
-		oss << L"ParseQuery error: " << std::wstring_view { error };
-		queryResults().Text(oss.str());
-		queryResults().Foreground(SolidColorBrush { Colors::Red() });
-		queryResults().Background(SolidColorBrush { Colors::DarkGray() });
+	co_await resume_on_signal(complete.get());
+
+	if (error)
+	{
+		ShowError(L"ParseQuery"sv, *error);
 		co_return;
 	}
 
 	hstring results;
 
-	if (!co_await connection.FetchQuery(parsedId, L"", {},
-		[&results](const hstring& fetched)
+	co_await connection.FetchQuery(parsedId, L"", {},
+		[&results](const JsonObject& fetched)
 	{
-		results = fetched;
+		results = fetched.ToString();
 	},
-	{},
-		[&error](const hstring& message)
+		[&complete]()
 	{
-		error = message;
-	}))
+		SetEvent(complete.get());
+	},
+		[&error, &complete](const hstring& message)
 	{
-		std::wostringstream oss;
+		error = std::make_optional(message);
+		SetEvent(complete.get());
+	});
 
-		oss << L"FetchQuery error: " << std::wstring_view { error };
-		queryResults().Text(oss.str());
-		queryResults().Foreground(SolidColorBrush { Colors::Red() });
-		queryResults().Background(SolidColorBrush { Colors::DarkGray() });
+	co_await resume_on_signal(complete.get());
+
+	if (error)
+	{
+		ShowError(L"FetchQuery"sv, *error);
 		co_return;
 	}
 
 	co_await connection.Unsubscribe(parsedId);
 	co_await connection.DiscardQuery(parsedId);
 
-	if (!co_await connection.Shutdown([&error](const hstring& message)
+	co_await connection.Shutdown(
+		[&complete]()
+	{
+		SetEvent(complete.get());
+	},
+		[&error, &complete](const hstring& message)
 	{
 		error = message;
-	}))
-	{
-		std::wostringstream oss;
+		SetEvent(complete.get());
+	});
 
-		oss << L"Shutdown error: " << std::wstring_view { error };
-		queryResults().Text(oss.str());
-		queryResults().Foreground(SolidColorBrush { Colors::Red() });
-		queryResults().Background(SolidColorBrush { Colors::DarkGray() });
+	co_await resume_on_signal(complete.get());
+
+	if (error)
+	{
+		ShowError(L"Shutdown"sv, *error);
 		co_return;
 	}
 
+	co_await resume_foreground(Dispatcher());
+
 	queryResults().Text(results);
+}
+
+fire_and_forget MainPage::ShowError(std::wstring_view name, std::wstring_view message)
+{
+	std::wostringstream oss;
+
+	oss << name <<  L" error: " << message;
+
+	const hstring error { oss.str() };
+
+	co_await resume_foreground(Dispatcher());
+
+	queryResults().Text(error);
+	queryResults().Foreground(SolidColorBrush { Colors::Red() });
+	queryResults().Background(SolidColorBrush { Colors::DarkGray() });
 }
 
 }

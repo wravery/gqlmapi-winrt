@@ -43,7 +43,10 @@
       </uap:VisualElements>
       <Extensions>
         <uap:Extension Category="windows.appService">
-          <uap3:AppService Name="gqlmapi" />
+          <uap3:AppService Name="gqlmapi.client" />
+        </uap:Extension>
+        <uap:Extension Category="windows.appService">
+          <uap3:AppService Name="gqlmapi.bridge" />
         </uap:Extension>
         <desktop:Extension Category="windows.fullTrustProcess" Executable="bridge\bridge.exe" />
       </Extensions>

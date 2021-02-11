@@ -1,3 +1,5 @@
 namespace appservice
 {
+    delegate Windows.Foundation.IAsyncAction ServiceRequestHandler(Windows.Foundation.Collections.ValueSet message);
+    delegate void ServiceShutdownHandler();
 }

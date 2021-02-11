@@ -1,37 +1,32 @@
 ﻿#pragma once
 #include "App.xaml.g.h"
 
-#include <map>
-#include <mutex>
 #include <vector>
 
 namespace winrt::appservice::implementation
 {
-    struct PayloadQueue
+    struct ServiceConnection : implements<ServiceConnection, IInspectable>
     {
-        std::mutex mutex;
-        std::condition_variable condition;
-        std::vector<Windows::Data::Json::JsonObject> payloads;
-        bool shutdown = false;
-    };
+        ServiceConnection() = default;
 
-    struct App;
+        explicit ServiceConnection(
+            const Windows::ApplicationModel::AppService::AppServiceConnection& appServiceConnection,
+            const Windows::ApplicationModel::Background::BackgroundTaskDeferral& backgroundTaskDeferral,
+            const ServiceRequestHandler& onResponse, const ServiceShutdownHandler& onShutdown);
 
-    struct ServiceConnection
-    {
-        explicit ServiceConnection(int connectionId, App& app);
+        fire_and_forget SendRequestAsync(const Windows::Foundation::Collections::ValueSet& message);
 
         void OnAppServicesCanceled(Windows::ApplicationModel::Background::IBackgroundTaskInstance const& sender, Windows::ApplicationModel::Background::BackgroundTaskCancellationReason const& reason);
         void OnServiceClosed(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceClosedEventArgs const& reason);
-
-        const int m_connectionId;
-        App& m_app;
-
-        Windows::ApplicationModel::AppService::AppServiceConnection m_appServiceConnection { nullptr };
-        Windows::ApplicationModel::Background::BackgroundTaskDeferral m_backgroundTaskDeferral { nullptr };
+        Windows::Foundation::IAsyncAction OnRequestReceived(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceRequestReceivedEventArgs const& args);
 
     private:
         void ShutdownService();
+
+        Windows::ApplicationModel::AppService::AppServiceConnection m_appServiceConnection;
+        Windows::ApplicationModel::Background::BackgroundTaskDeferral m_backgroundTaskDeferral;
+        ServiceRequestHandler m_onResponse;
+        ServiceShutdownHandler m_onShutdown;
     };
 
     struct App : AppT<App>
@@ -44,16 +39,16 @@ namespace winrt::appservice::implementation
 
         // App Service
         void OnBackgroundActivated(Windows::ApplicationModel::Activation::BackgroundActivatedEventArgs const&);
-        void OnServiceConnectionShutdown(int connectionId);
 
     private:
-        Windows::Foundation::IAsyncAction OnRequestReceived(Windows::ApplicationModel::AppService::AppServiceConnection const& sender, Windows::ApplicationModel::AppService::AppServiceRequestReceivedEventArgs const& args);
+        Windows::Foundation::IAsyncAction OnClientRequestReceived(const Windows::Foundation::Collections::ValueSet& message);
+        Windows::Foundation::IAsyncAction OnBridgeResponseReceived(const Windows::Foundation::Collections::ValueSet& message);
+        void OnClientShutdown();
+        void OnBridgeShutdown();
 
-        int parsedId = -1;
-        std::wstring results;
+        std::vector<Windows::Foundation::Collections::ValueSet> m_bridgeQueue;
 
-        PayloadQueue m_requestQueue;
-        PayloadQueue m_responseQueue;
-        std::map<int, std::unique_ptr<ServiceConnection>> m_serviceConnections;
+        com_ptr<ServiceConnection> m_clientConnection;
+        com_ptr<ServiceConnection> m_bridgeConnection;
     };
 }

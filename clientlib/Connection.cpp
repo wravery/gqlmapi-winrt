@@ -17,13 +17,13 @@ namespace winrt::clientlib::implementation {
 Connection::Connection(bool useDefaultProfile)
 	: m_useDefaultProfile { useDefaultProfile }
 {
-	m_serviceConnection.AppServiceName(L"gqlmapi");
+	m_serviceConnection.AppServiceName(L"gqlmapi.client");
 	m_serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
 }
 
 IAsyncOperation<bool> Connection::OpenAsync(const ErrorHandler& onError) const
 {
-	ErrorHandler onErrorCopy { onError };
+	const auto onErrorCopy { onError };
 
 	if (!m_opened)
 	{
@@ -42,7 +42,7 @@ IAsyncOperation<bool> Connection::OpenAsync(const ErrorHandler& onError) const
 			co_return false;
 		}
 
-		co_await FullTrustProcessLauncher::LaunchFullTrustProcessForCurrentAppAsync();
+		m_serviceConnection.RequestReceived({ this, &Connection::OnRequestReceived });
 
 		m_opened = true;
 	}
@@ -55,14 +55,13 @@ IAsyncOperation<bool> Connection::OpenAsync(const ErrorHandler& onError) const
 		startService.SetNamedValue(L"type", JsonValue::CreateStringValue(L"startService"));
 		startService.SetNamedValue(L"useDefaultProfile", JsonValue::CreateBooleanValue(true));
 
-		ValueSet queueRequests;
+		ValueSet requests;
 
-		queueRequests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
-		queueRequests.Insert(L"requests", PropertyValue::CreateStringArray({
+		requests.Insert(L"requests", PropertyValue::CreateStringArray({
 			startService.ToString(),
 			}));
 
-		const auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
+		const auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
 		const auto messageStatus = messageResult.Status();
 
 		if (messageStatus != AppServiceResponseStatus::Success)
@@ -78,33 +77,152 @@ IAsyncOperation<bool> Connection::OpenAsync(const ErrorHandler& onError) const
 			co_return false;
 		}
 
+		co_await FullTrustProcessLauncher::LaunchFullTrustProcessForCurrentAppAsync();
+
 		m_started = true;
 	}
 
 	co_return true;
 }
 
-IAsyncOperation<bool> Connection::CloseAsync(const ErrorHandler& onError) const
+void Connection::Close() const
 {
-	ErrorHandler onErrorCopy { onError };
+	if (m_opened)
+	{
+		m_serviceConnection.Close();
+		m_opened = false;
+	}
+}
+
+IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender */, const AppServiceRequestReceivedEventArgs& args) const
+{
+	const auto messageDeferral { args.GetDeferral() };
+	const auto messageRequest { args.Request() };
+	const auto message { messageRequest.Message() };
+	com_array<hstring> responses;
+	bool stopped = false;
+
+	message.Lookup(L"responses").as<IPropertyValue>().GetStringArray(responses);
+
+	for (const auto& response : responses)
+	{
+		const auto responseObject = JsonObject::Parse(response);
+		const auto requestId = static_cast<std::int32_t>(responseObject.GetNamedNumber(L"requestId"));
+		const auto type = responseObject.GetNamedString(L"type");
+
+		if (type == L"parsed")
+		{
+			const auto itr = m_onParsed.find(requestId);
+
+			if (itr != m_onParsed.end())
+			{
+				itr->second(static_cast<std::int32_t>(responseObject.GetNamedNumber(L"queryId")));
+				m_onParsed.erase(itr);
+			}
+		}
+		else if (type == L"next")
+		{
+			const auto itr = m_onFetched.find(requestId);
+
+			if (itr != m_onFetched.end())
+			{
+				itr->second(responseObject.GetNamedObject(L"fetched"));
+			}
+		}
+		else if (type == L"complete")
+		{
+			const auto itrFetched = m_onFetched.find(requestId);
+			const auto itrComplete = m_onComplete.find(requestId);
+
+			if (itrFetched != m_onFetched.end())
+			{
+				m_onFetched.erase(itrFetched);
+			}
+
+			if (itrComplete != m_onComplete.end())
+			{
+				itrComplete->second();
+				m_onComplete.erase(itrComplete);
+			}
+		}
+		else if (type == L"error")
+		{
+			const auto itr = m_onError.find(requestId);
+
+			if (itr != m_onError.end())
+			{
+				itr->second(responseObject.GetNamedString(L"message"));
+			}
+		}
+		else if (type == L"stopped")
+		{
+			const auto itr = m_onStopped.find(requestId);
+
+			if (itr != m_onStopped.end())
+			{
+				itr->second();
+			}
+
+			stopped = true;
+			break;
+		}
+		else
+		{
+			const auto itr = m_onError.find(requestId);
+
+			if (itr != m_onError.end())
+			{
+				std::wostringstream oss;
+
+				oss << L"Unexpected response type: " << std::wstring_view { type };
+				itr->second(oss.str());
+			}
+		}
+	}
+
+	messageDeferral.Complete();
+
+	if (stopped)
+	{
+		Close();
+	}
+
+	co_return;
+}
+
+Connection::~Connection()
+{
+	Close();
+}
+
+IAsyncOperation<bool> Connection::Shutdown(const StoppedHandler& onStopped, const ErrorHandler& onError) const
+{
+	const auto onStoppedCopy { onStopped };
+	const auto onErrorCopy { onError };
 
 	if (m_started)
 	{
 		const auto requestId = m_nextRequestId++;
+
+		m_onStopped[requestId] = onStoppedCopy;
+
+		if (onErrorCopy)
+		{
+			m_onError[requestId] = onErrorCopy;
+		}
+
 		JsonObject stopService;
 
 		stopService.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
 		stopService.SetNamedValue(L"type", JsonValue::CreateStringValue(L"stopService"));
 
-		ValueSet queueRequests;
+		ValueSet requests;
 
-		queueRequests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
-		queueRequests.Insert(L"requests", PropertyValue::CreateStringArray({
+		requests.Insert(L"requests", PropertyValue::CreateStringArray({
 			stopService.ToString(),
 			}));
 
-
-		auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
+		auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
 		auto messageStatus = messageResult.Status();
 
 		if (messageStatus != AppServiceResponseStatus::Success)
@@ -120,89 +238,22 @@ IAsyncOperation<bool> Connection::CloseAsync(const ErrorHandler& onError) const
 			co_return false;
 		}
 
-		ValueSet getResponses;
-
-		getResponses.Insert(L"command", PropertyValue::CreateString(L"get-responses"));
-
-		messageResult = co_await m_serviceConnection.SendMessageAsync(getResponses);
-		messageStatus = messageResult.Status();
-
-		if (messageStatus != AppServiceResponseStatus::Success)
-		{
-			if (onErrorCopy)
-			{
-				std::wostringstream oss;
-
-				oss << L"AppServiceConnection::SendMessageAsync(getResponses) failed: " << static_cast<int>(messageStatus);
-				onErrorCopy(oss.str());
-			}
-
-			co_return false;
-		}
-
-		com_array<hstring> responses;
-		
-		messageResult.Message().Lookup(L"responses").as<IPropertyValue>().GetStringArray(responses);
-
-		if (responses.size() != 1)
-		{
-			if (onErrorCopy)
-			{
-				std::wostringstream oss;
-
-				oss << L"Unexpected number of responses: " << responses.size();
-				onErrorCopy(oss.str());
-			}
-
-			co_return false;
-		}
-
-		const auto responseObject = JsonObject::Parse(responses.front());
-		const auto responseRequestId = static_cast<std::int32_t>(responseObject.GetNamedNumber(L"requestId"));
-		const auto responseType = responseObject.GetNamedString(L"type");
-
-		if (responseRequestId != requestId
-			|| responseType != L"stopped")
-		{
-			if (onErrorCopy)
-			{
-				std::wostringstream oss;
-
-				oss << L"Unexpected requestId: " << responseRequestId << L" type: " << static_cast<std::wstring_view>(responseType);
-				onErrorCopy(oss.str());
-			}
-
-			co_return false;
-		}
-
 		m_started = false;
 	}
-
-	if (m_opened)
+	else if (onStoppedCopy)
 	{
-		m_serviceConnection.Close();
-		m_opened = false;
+		onStoppedCopy();
 	}
 
 	co_return true;
 }
 
-Connection::~Connection()
-{
-	CloseAsync({}).get();
-}
-
-IAsyncOperation<bool> Connection::Shutdown(const ErrorHandler& onError) const
-{
-	return CloseAsync(onError);
-}
-
 IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
 	const ParsedHandler& onParsed, const ErrorHandler& onError) const
 {
-	hstring queryCopy { query };
-	ParsedHandler onParsedCopy { onParsed };
-	ErrorHandler onErrorCopy { onError };
+	const auto queryCopy { query };
+	const auto onParsedCopy { onParsed };
+	const auto onErrorCopy { onError };
 
 	if (!co_await OpenAsync(onError))
 	{
@@ -210,20 +261,28 @@ IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
 	}
 
 	const auto requestId = m_nextRequestId++;
+
+	m_onParsed[requestId] = onParsedCopy;
+
+	if (onErrorCopy)
+	{
+		m_onError[requestId] = onErrorCopy;
+	}
+
 	JsonObject parseQuery;
 
 	parseQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
 	parseQuery.SetNamedValue(L"type", JsonValue::CreateStringValue(L"parseQuery"));
 	parseQuery.SetNamedValue(L"query", JsonValue::CreateStringValue(queryCopy));
 
-	ValueSet queueRequests;
+	ValueSet requests;
 
-	queueRequests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
-	queueRequests.Insert(L"requests", PropertyValue::CreateStringArray({
+	requests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
+	requests.Insert(L"requests", PropertyValue::CreateStringArray({
 		parseQuery.ToString(),
 		}));
 
-	auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
+	auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
 	auto messageStatus = messageResult.Status();
 
 	if (messageStatus != AppServiceResponseStatus::Success)
@@ -238,65 +297,6 @@ IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
 
 		co_return false;
 	}
-
-	ValueSet getResponses;
-
-	getResponses.Insert(L"command", PropertyValue::CreateString(L"get-responses"));
-
-	messageResult = co_await m_serviceConnection.SendMessageAsync(getResponses);
-	messageStatus = messageResult.Status();
-
-	if (messageStatus != AppServiceResponseStatus::Success)
-	{
-		if (onErrorCopy)
-		{
-			std::wostringstream oss;
-
-			oss << L"AppServiceConnection::SendMessageAsync(getResponses) failed: " << static_cast<int>(messageStatus);
-			onErrorCopy(oss.str());
-		}
-
-		co_return false;
-	}
-
-	com_array<hstring> responses;
-
-	messageResult.Message().Lookup(L"responses").as<IPropertyValue>().GetStringArray(responses);
-
-	if (responses.size() != 1)
-	{
-		if (onErrorCopy)
-		{
-			std::wostringstream oss;
-
-			oss << L"Unexpected number of responses: " << responses.size();
-			onErrorCopy(oss.str());
-		}
-
-		co_return false;
-	}
-
-	const auto responseObject = JsonObject::Parse(responses.front());
-	const auto responseRequestId = static_cast<std::int32_t>(responseObject.GetNamedNumber(L"requestId"));
-	const auto responseType = responseObject.GetNamedString(L"type");
-
-	if (responseRequestId != requestId
-		|| responseType != L"parsed")
-	{
-		if (onErrorCopy)
-		{
-			std::wostringstream oss;
-
-			oss << L"Unexpected requestId: " << responseRequestId << L" type: " << static_cast<std::wstring_view>(responseType);
-			onErrorCopy(oss.str());
-		}
-
-		co_return false;
-	}
-
-	const int parsedId = static_cast<int>(responseObject.GetNamedNumber(L"queryId"));
-
-	onParsedCopy(parsedId);
 
 	co_return true;
 }
@@ -331,11 +331,11 @@ IAsyncOperation<bool> Connection::DiscardQuery(std::int32_t queryId) const
 IAsyncOperation<bool> Connection::FetchQuery(std::int32_t queryId, const hstring& operationName, const JsonObject& variables,
 	const FetchedHandler& onFetched, const CompleteHandler& onComplete, const ErrorHandler& onError) const
 {
-	hstring operationNameCopy { operationName };
-	JsonObject variablesCopy { variables };
-	FetchedHandler onFetchedCopy { onFetched };
-	CompleteHandler onCompleteCopy { onComplete };
-	ErrorHandler onErrorCopy { onError };
+	const auto operationNameCopy { operationName };
+	const auto variablesCopy { variables };
+	const auto onFetchedCopy { onFetched };
+	const auto onCompleteCopy { onComplete };
+	const auto onErrorCopy { onError };
 
 	if (!co_await OpenAsync(onError))
 	{
@@ -343,6 +343,19 @@ IAsyncOperation<bool> Connection::FetchQuery(std::int32_t queryId, const hstring
 	}
 
 	const auto requestId = m_nextRequestId++;
+
+	m_onFetched[requestId] = onFetchedCopy;
+
+	if (onCompleteCopy)
+	{
+		m_onComplete[requestId] = onCompleteCopy;
+	}
+
+	if (onErrorCopy)
+	{
+		m_onError[requestId] = onErrorCopy;
+	}
+
 	JsonObject fetchQuery;
 
 	fetchQuery.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
@@ -372,81 +385,6 @@ IAsyncOperation<bool> Connection::FetchQuery(std::int32_t queryId, const hstring
 		}
 
 		co_return false;
-	}
-
-	ValueSet getResponses;
-
-	getResponses.Insert(L"command", PropertyValue::CreateString(L"get-responses"));
-
-	bool complete = false;
-
-	while (!complete)
-	{
-		messageResult = co_await m_serviceConnection.SendMessageAsync(getResponses);
-		messageStatus = messageResult.Status();
-
-		if (messageStatus != AppServiceResponseStatus::Success)
-		{
-			if (onErrorCopy)
-			{
-				std::wostringstream oss;
-
-				oss << L"AppServiceConnection::SendMessageAsync(getResponses) failed: " << static_cast<int>(messageStatus);
-				onErrorCopy(oss.str());
-			}
-
-			co_return false;
-		}
-
-		com_array<hstring> responses;
-
-		messageResult.Message().Lookup(L"responses").as<IPropertyValue>().GetStringArray(responses);
-
-		for (const auto& response : responses)
-		{
-			const auto responseObject = JsonObject::Parse(response);
-			const auto responseRequestId = static_cast<std::int32_t>(responseObject.GetNamedNumber(L"requestId"));
-			const auto responseType = responseObject.GetNamedString(L"type");
-
-			if (responseRequestId != requestId)
-			{
-				if (onErrorCopy)
-				{
-					std::wostringstream oss;
-
-					oss << L"Unexpected requestId: " << requestId;
-					onErrorCopy(oss.str());
-				}
-
-				co_return false;
-			}
-
-			if (responseType == L"next")
-			{
-				onFetchedCopy(responseObject.GetNamedObject(L"data").ToString());
-			}
-			else if (responseType == L"complete")
-			{
-				if (onCompleteCopy)
-				{
-					onCompleteCopy();
-				}
-
-				complete = true;
-			}
-			else
-			{
-				if (onErrorCopy)
-				{
-					std::wostringstream oss;
-
-					oss << L"Unexpected requestId: " << responseRequestId << L" type: " << static_cast<std::wstring_view>(responseType);
-					onErrorCopy(oss.str());
-				}
-
-				co_return false;
-			}
-		}
 	}
 
 	co_return true;

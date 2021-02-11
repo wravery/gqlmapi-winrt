@@ -5,17 +5,13 @@
 
 #include <windows.h>
 
-#include <array>
 #include <atomic>
 #include <iostream>
 #include <map>
 #include <memory>
-#include <queue>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
-#include <thread>
 
 using namespace graphql;
 
@@ -27,30 +23,26 @@ using namespace Windows::Foundation::Collections;
 
 using namespace std::literals;
 
-struct SubscriptionPayloadQueue : std::enable_shared_from_this<SubscriptionPayloadQueue>
+struct SubscriptionPayloadQueue : implements<SubscriptionPayloadQueue, IInspectable>
 {
-	explicit SubscriptionPayloadQueue() noexcept;
+	explicit SubscriptionPayloadQueue(const AppServiceConnection& serviceConnection, int requestId) noexcept;
 	~SubscriptionPayloadQueue();
 
-	void sendResponse(JsonObject& response);
+	fire_and_forget sendResponses(const com_array<JsonObject>& responses);
 	void Unsubscribe();
 
-	int requestId = 0;
+	const int requestId;
 	bool registered = false;
-	std::mutex mutex;
-	std::unique_ptr<std::thread> worker;
-	std::condition_variable condition;
-	std::queue<std::future<response::Value>> payloads;
 	std::optional<service::SubscriptionKey> key;
 	std::weak_ptr<service::Request> wpService;
 
 	AppServiceConnection serviceConnection;
 };
 
-SubscriptionPayloadQueue::SubscriptionPayloadQueue() noexcept
+SubscriptionPayloadQueue::SubscriptionPayloadQueue(const AppServiceConnection& serviceConnection, int requestId) noexcept
+	: serviceConnection { serviceConnection }
+	, requestId { requestId }
 {
-	serviceConnection.AppServiceName(L"gqlmapi");
-	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
 }
 
 SubscriptionPayloadQueue::~SubscriptionPayloadQueue()
@@ -58,30 +50,26 @@ SubscriptionPayloadQueue::~SubscriptionPayloadQueue()
 	Unsubscribe();
 }
 
-void SubscriptionPayloadQueue::sendResponse(JsonObject& response)
+fire_and_forget SubscriptionPayloadQueue::sendResponses(const com_array<JsonObject>& responses)
 {
-	response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
+	com_array<hstring> payloads(static_cast<com_array<hstring>::size_type>(responses.size()));
+
+	std::transform(responses.begin(), responses.end(), payloads.begin(),
+		[id = requestId](const JsonObject& response)
+	{
+		response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(id));
+		return response.ToString();
+	});
 
 	ValueSet responseMessage;
 
-	responseMessage.Insert(L"command", PropertyValue::CreateString(L"send-responses"));
-	responseMessage.Insert(L"responses", PropertyValue::CreateStringArray({
-		response.ToString(),
-		}));
+	responseMessage.Insert(L"responses", PropertyValue::CreateStringArray(payloads));
 
-	serviceConnection.SendMessageAsync(responseMessage).get();
+	co_await serviceConnection.SendMessageAsync(responseMessage);
 }
 
 void SubscriptionPayloadQueue::Unsubscribe()
 {
-	std::unique_lock<std::mutex> lock(mutex);
-
-	if (worker)
-	{
-		worker->join();
-		worker.reset();
-	}
-
 	if (!registered)
 	{
 		return;
@@ -92,21 +80,23 @@ void SubscriptionPayloadQueue::Unsubscribe()
 	auto deferUnsubscribe = std::move(key);
 	auto serviceSingleton = wpService.lock();
 
-	lock.unlock();
-	condition.notify_one();
-
 	if (deferUnsubscribe
 		&& serviceSingleton)
 	{
 		serviceSingleton->unsubscribe(std::launch::deferred, *deferUnsubscribe).get();
 	}
+
+	JsonObject complete;
+
+	complete.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
+
+	sendResponses({ complete });
 }
 
 class Service : public implements<Service, IInspectable>
 {
 public:
 	explicit Service();
-	~Service();
 
 	IAsyncAction run();
 
@@ -118,43 +108,81 @@ private:
 	IAsyncAction fetchQuery(int requestId, const JsonObject& request);
 	void unsubscribe(const JsonObject& request);
 
-	IAsyncAction sendResponse(int requestId, JsonObject& response);
+	IAsyncAction onRequestReceived(const AppServiceConnection& sender, const AppServiceRequestReceivedEventArgs& args);
+
+	IAsyncAction sendResponse(int requestId, const JsonObject& response);
+	static JsonObject convertNextPayload(std::future<response::Value>&& payload);
+	static JsonObject buildComplete();
 	static std::string ConvertToUTF8(std::wstring_view value);
 	static std::wstring ConvertToUTF16(std::string_view value);
 
 	std::shared_ptr<service::Request> serviceSingleton;
 
-	std::atomic_bool shutdown;
-
+	handle shutdownEvent;
 	AppServiceConnection serviceConnection;
 
 	std::map<int, peg::ast> queryMap;
-	std::map<int, std::shared_ptr<SubscriptionPayloadQueue>> subscriptionMap;
+	std::map<int, com_ptr<SubscriptionPayloadQueue>> subscriptionMap;
 };
 
 Service::Service()
 {
-	serviceConnection.AppServiceName(L"gqlmapi");
+	serviceConnection.AppServiceName(L"gqlmapi.bridge");
 	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
 }
 
-Service::~Service()
-{
-	serviceConnection.Close();
-}
-
-IAsyncAction Service::sendResponse(int requestId, JsonObject& response)
+IAsyncAction Service::sendResponse(int requestId, const JsonObject& response)
 {
 	response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
 
 	ValueSet responseMessage;
 
-	responseMessage.Insert(L"command", PropertyValue::CreateString(L"send-responses"));
 	responseMessage.Insert(L"responses", PropertyValue::CreateStringArray({
 		response.ToString(),
 		}));
 
 	co_await serviceConnection.SendMessageAsync(responseMessage);
+}
+
+JsonObject Service::convertNextPayload(std::future<response::Value>&& payload)
+{
+	response::Value document { response::Type::Map };
+
+	try
+	{
+		document = payload.get();
+	}
+	catch (service::schema_exception& scx)
+	{
+		document.reserve(2);
+		document.emplace_back(std::string { service::strData }, {});
+		document.emplace_back(std::string { service::strErrors }, scx.getErrors());
+	}
+	catch (const std::exception& ex)
+	{
+		std::ostringstream oss;
+
+		oss << "Caught exception delivering subscription payload: " << ex.what();
+		document.reserve(2);
+		document.emplace_back(std::string { service::strData }, {});
+		document.emplace_back(std::string { service::strErrors }, response::Value { oss.str() });
+	}
+
+	JsonObject next;
+
+	next.SetNamedValue(L"type", JsonValue::CreateStringValue(L"next"));
+	next.SetNamedValue(L"fetched", JsonObject::Parse(ConvertToUTF16(response::toJSON(std::move(document)))));
+
+	return next;
+}
+
+JsonObject Service::buildComplete()
+{
+	JsonObject complete;
+
+	complete.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
+
+	return complete;
 }
 
 std::string Service::ConvertToUTF8(std::wstring_view value)
@@ -203,6 +231,8 @@ std::wstring Service::ConvertToUTF16(std::string_view value)
 
 IAsyncAction Service::run()
 {
+	co_await resume_background();
+
 	auto status = co_await serviceConnection.OpenAsync();
 
 	if (status != AppServiceConnectionStatus::Success)
@@ -213,85 +243,13 @@ IAsyncAction Service::run()
 		throw std::runtime_error(oss.str());
 	}
 
-	ValueSet getRequests;
+	shutdownEvent.attach(CreateEventW(nullptr, true, false, nullptr));
 
-	getRequests.Insert(L"command", PropertyValue::CreateString(L"get-requests"));
+	serviceConnection.RequestReceived({ get_weak(), &Service::onRequestReceived });
 
-	auto serviceResponse = co_await serviceConnection.SendMessageAsync(getRequests);
+	co_await resume_on_signal(shutdownEvent.get());
 
-	while (serviceResponse.Status() == AppServiceResponseStatus::Success)
-	{
-		bool stopped = false;
-		com_array<hstring> requests;
-
-		serviceResponse.Message().Lookup(L"requests").as<IPropertyValue>().GetStringArray(requests);
-
-		for (const auto& request : requests)
-		{
-			const auto requestObject = JsonObject::Parse(request);
-			auto requestId = static_cast<int>(requestObject.GetNamedNumber(L"requestId"));
-			auto type = requestObject.GetNamedString(L"type");
-			std::optional<JsonObject> response;
-
-			try
-			{
-				if (type == L"startService")
-				{
-					startService(requestObject);
-				}
-				else if (type == L"stopService")
-				{
-					response = std::make_optional<JsonObject>();
-					stopService(*response);
-					stopped = true;
-				}
-				else if (type == L"parseQuery")
-				{
-					response = std::make_optional<JsonObject>();
-					parseQuery(requestObject, *response);
-				}
-				else if (type == L"discardQuery")
-				{
-					discardQuery(requestObject);
-				}
-				else if (type == L"fetchQuery")
-				{
-					co_await fetchQuery(requestId, requestObject);
-				}
-				else if (type == L"unsubscribe")
-				{
-					unsubscribe(requestObject);
-				}
-				else
-				{
-					std::ostringstream oss;
-
-					oss << "Unknown request type: " << ConvertToUTF8(type);
-					throw std::logic_error { oss.str() };
-				}
-			}
-			catch (const std::exception& ex)
-			{
-				response = std::make_optional<JsonObject>();
-				response->SetNamedValue(L"type", JsonValue::CreateStringValue(L"error"));
-				response->SetNamedValue(L"message", JsonValue::CreateStringValue(ConvertToUTF16(ex.what())));
-			}
-
-			if (response)
-			{
-				co_await sendResponse(requestId, *response);
-			}
-		}
-
-		if (stopped)
-		{
-			break;
-		}
-
-		serviceResponse = co_await serviceConnection.SendMessageAsync(getRequests);
-	}
-
-	co_return;
+	serviceConnection.Close();
 }
 
 void Service::startService(const JsonObject& request)
@@ -333,8 +291,9 @@ void Service::discardQuery(const JsonObject& request)
 
 IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 {
-	const auto queryId = static_cast<int>(request.GetNamedNumber(L"queryId"));
-	const auto itrQuery = queryMap.find(queryId);
+	const auto strong_this { get_strong() };
+	const auto queryId { static_cast<int>(request.GetNamedNumber(L"queryId")) };
+	const auto itrQuery { queryMap.find(queryId) };
 
 	if (itrQuery == queryMap.cend())
 	{
@@ -351,82 +310,7 @@ IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 		? response::parseJSON(ConvertToUTF8(request.GetNamedObject(variablesKey).ToString()))
 		: response::Value(response::Type::Map));
 
-	auto payloadQueue = std::make_shared<SubscriptionPayloadQueue>();
-
-	co_await payloadQueue->serviceConnection.OpenAsync();
-
-	std::unique_lock lock { payloadQueue->mutex };
-
-	payloadQueue->requestId = requestId;
-	payloadQueue->worker = std::make_unique<std::thread>([payloadQueue]()
-	{
-		bool registered = true;
-
-		while (registered)
-		{
-			std::unique_lock<std::mutex> lock(payloadQueue->mutex);
-
-			payloadQueue->condition.wait(lock, [payloadQueue]() noexcept -> bool
-			{
-				return !payloadQueue->registered
-					|| !payloadQueue->payloads.empty();
-			});
-
-			auto payloads = std::move(payloadQueue->payloads);
-
-			registered = payloadQueue->registered;
-			lock.unlock();
-
-			std::vector<std::string> json;
-
-			while (!payloads.empty())
-			{
-				response::Value document { response::Type::Map };
-				auto payload = std::move(payloads.front());
-
-				payloads.pop();
-
-				try
-				{
-					document = payload.get();
-				}
-				catch (service::schema_exception& scx)
-				{
-					document.reserve(2);
-					document.emplace_back(std::string { service::strData }, {});
-					document.emplace_back(std::string { service::strErrors }, scx.getErrors());
-				}
-				catch (const std::exception& ex)
-				{
-					std::ostringstream oss;
-
-					oss << "Caught exception delivering subscription payload: " << ex.what();
-					document.reserve(2);
-					document.emplace_back(std::string { service::strData }, {});
-					document.emplace_back(std::string { service::strErrors }, response::Value { oss.str() });
-				}
-
-				json.push_back(response::toJSON(std::move(document)));
-			}
-
-			for (const auto& data : json)
-			{
-				JsonObject next;
-
-				next.SetNamedValue(L"type", JsonValue::CreateStringValue(L"next"));
-				next.SetNamedValue(L"data", JsonObject::Parse(ConvertToUTF16(data)));
-
-				payloadQueue->sendResponse(next);
-			}
-		}
-
-		JsonObject complete;
-
-		complete.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
-
-		payloadQueue->sendResponse(complete);
-		payloadQueue->serviceConnection.Close();
-	});
+	SubscriptionPayloadQueue payloadQueue { serviceConnection, requestId };
 
 	if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
 	{
@@ -435,39 +319,41 @@ IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 			throw std::runtime_error("Duplicate subscription");
 		}
 
-		payloadQueue->registered = true;
-		payloadQueue->key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
+		payloadQueue.registered = true;
+		payloadQueue.key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
 			service::SubscriptionParams { nullptr,
 				peg::ast { ast },
 				std::move(operationName),
 				std::move(parsedVariables) },
-			[payloadQueue](std::future<response::Value> payload) noexcept -> void
+			[weak_queue { payloadQueue.get_weak() }](std::future<response::Value> payload) noexcept -> void
 		{
-			std::unique_lock lock { payloadQueue->mutex };
+			const auto subscriptionQueue { weak_queue.get() };
 
-			if (!payloadQueue->registered)
+			if (!subscriptionQueue)
 			{
 				return;
 			}
-			payloadQueue->payloads.push(std::move(payload));
 
-			lock.unlock();
-			payloadQueue->condition.notify_one();
+			subscriptionQueue->sendResponses({
+				convertNextPayload(std::move(payload)),
+				});
 		}).get());
 	}
 	else
 	{
-		payloadQueue->payloads.push(serviceSingleton->resolve(std::launch::deferred,
+		auto payload = serviceSingleton->resolve(std::launch::deferred,
 			nullptr,
 			ast,
 			operationName,
-			std::move(parsedVariables)));
+			std::move(parsedVariables));
 
-		lock.unlock();
-		payloadQueue->condition.notify_one();
+		payloadQueue.sendResponses({
+			convertNextPayload(std::move(payload)),
+			buildComplete(),
+			});
 	}
 
-	subscriptionMap[queryId] = std::move(payloadQueue);
+	subscriptionMap[queryId] = payloadQueue.get_strong();
 
 	co_return;
 }
@@ -483,9 +369,87 @@ void Service::unsubscribe(const JsonObject& request)
 	}
 }
 
+IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */, const AppServiceRequestReceivedEventArgs& args)
+{
+	const auto strong_this { get_strong() };
+	const auto messageDeferral { args.GetDeferral() };
+	const auto messageRequest { args.Request() };
+	const auto message { messageRequest.Message() };
+	com_array<hstring> requests;
+	bool stopped = false;
+
+	message.Lookup(L"requests").as<IPropertyValue>().GetStringArray(requests);
+
+	for (const auto& request : requests)
+	{
+		const auto requestObject = JsonObject::Parse(request);
+		const auto requestId = static_cast<int>(requestObject.GetNamedNumber(L"requestId"));
+		const auto type = requestObject.GetNamedString(L"type");
+		std::optional<JsonObject> response;
+
+		try
+		{
+			if (type == L"startService")
+			{
+				startService(requestObject);
+			}
+			else if (type == L"stopService")
+			{
+				response = std::make_optional<JsonObject>();
+				stopService(*response);
+				stopped = true;
+			}
+			else if (type == L"parseQuery")
+			{
+				response = std::make_optional<JsonObject>();
+				parseQuery(requestObject, *response);
+			}
+			else if (type == L"discardQuery")
+			{
+				discardQuery(requestObject);
+			}
+			else if (type == L"fetchQuery")
+			{
+				co_await fetchQuery(requestId, requestObject);
+			}
+			else if (type == L"unsubscribe")
+			{
+				unsubscribe(requestObject);
+			}
+			else
+			{
+				std::ostringstream oss;
+
+				oss << "Unknown request type: " << ConvertToUTF8(type);
+				throw std::logic_error { oss.str() };
+			}
+		}
+		catch (const std::exception& ex)
+		{
+			response = std::make_optional<JsonObject>();
+			response->SetNamedValue(L"type", JsonValue::CreateStringValue(L"error"));
+			response->SetNamedValue(L"message", JsonValue::CreateStringValue(ConvertToUTF16(ex.what())));
+		}
+
+		if (response)
+		{
+			co_await sendResponse(requestId, *response);
+		}
+	}
+
+	messageDeferral.Complete();
+
+	if (stopped)
+	{
+		SetEvent(shutdownEvent.get());
+	}
+}
+
 int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] PWSTR pCmdLine, [[maybe_unused]] int nCmdShow)
 {
 	init_apartment();
+
+	//MessageBoxW(HWND_DESKTOP, L"bridge.exe is ready...", L"Attach Debugger", MB_OK);
 
 	try
 	{

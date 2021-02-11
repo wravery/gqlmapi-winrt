@@ -2,6 +2,8 @@
 
 #include "MainPage.g.h"
 
+#include <string_view>
+
 namespace winrt::appservice::implementation
 {
     struct MainPage : MainPageT<MainPage>
@@ -12,6 +14,9 @@ namespace winrt::appservice::implementation
         void MyProperty(int32_t value);
 
         fire_and_forget ClickHandler(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+
+    private:
+        fire_and_forget ShowError(std::wstring_view name, std::wstring_view message);
     };
 }
 
