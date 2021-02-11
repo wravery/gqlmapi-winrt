@@ -277,7 +277,6 @@ IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
 
 	ValueSet requests;
 
-	requests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
 	requests.Insert(L"requests", PropertyValue::CreateStringArray({
 		parseQuery.ToString(),
 		}));
@@ -317,7 +316,6 @@ IAsyncOperation<bool> Connection::DiscardQuery(std::int32_t queryId) const
 
 	ValueSet queueRequests;
 
-	queueRequests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
 	queueRequests.Insert(L"requests", PropertyValue::CreateStringArray({
 		discardQuery.ToString(),
 		}));
@@ -366,7 +364,6 @@ IAsyncOperation<bool> Connection::FetchQuery(std::int32_t queryId, const hstring
 
 	ValueSet queueRequests;
 
-	queueRequests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
 	queueRequests.Insert(L"requests", PropertyValue::CreateStringArray({
 		fetchQuery.ToString(),
 		}));
@@ -406,7 +403,6 @@ IAsyncOperation<bool> Connection::Unsubscribe(std::int32_t queryId) const
 
 	ValueSet queueRequests;
 
-	queueRequests.Insert(L"command", PropertyValue::CreateString(L"queue-requests"));
 	queueRequests.Insert(L"requests", PropertyValue::CreateStringArray({
 		unsubscribe.ToString(),
 		}));
