@@ -109,6 +109,7 @@ private:
 	void unsubscribe(const JsonObject& request);
 
 	IAsyncAction onRequestReceived(const AppServiceConnection& sender, const AppServiceRequestReceivedEventArgs& args);
+	void onServiceClosed(const AppServiceConnection& sender, const AppServiceClosedEventArgs& reason);
 
 	IAsyncAction sendResponse(int requestId, const JsonObject& response);
 	static JsonObject convertNextPayload(std::future<response::Value>&& payload);
@@ -246,6 +247,7 @@ IAsyncAction Service::run()
 	shutdownEvent.attach(CreateEventW(nullptr, true, false, nullptr));
 
 	serviceConnection.RequestReceived({ get_weak(), &Service::onRequestReceived });
+	serviceConnection.ServiceClosed({ get_weak(), &Service::onServiceClosed });
 
 	co_await resume_on_signal(shutdownEvent.get());
 
@@ -443,6 +445,11 @@ IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */
 	{
 		SetEvent(shutdownEvent.get());
 	}
+}
+
+void Service::onServiceClosed(const AppServiceConnection& /* sender */, const AppServiceClosedEventArgs& /* reason */)
+{
+	SetEvent(shutdownEvent.get());
 }
 
 int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] PWSTR pCmdLine, [[maybe_unused]] int nCmdShow)
