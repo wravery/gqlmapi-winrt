@@ -5,7 +5,8 @@
     xmlns:local="using:appservice"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+    Unloaded="PageUnloaded">
 
     <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Padding="10">
         <Grid.RowDefinitions>
@@ -13,7 +14,36 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Button x:Name="myButton" Click="ClickHandler" HorizontalAlignment="Left" Grid.Row="0">Click Me</Button>
-        <TextBox x:Name="queryResults" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" Grid.Row="1" Text="Query Results go here!" IsReadOnly="True" TextWrapping="Wrap"></TextBox>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Button
+            x:Name="myButton"
+            Click="ClickHandler"
+            HorizontalAlignment="Left"
+            Grid.Row="0"
+            Grid.Column="0">
+            Run
+        </Button>
+
+        <TextBox
+            x:Name="queryEdit"
+            VerticalAlignment="Stretch"
+            HorizontalAlignment="Stretch"
+            Grid.Row="1" Grid.Column="0"
+            PlaceholderText="Define your query here..."
+            TextWrapping="Wrap"
+            AcceptsReturn="True"
+            InputScope="Text" />
+        <TextBox
+            x:Name="queryResults"
+            VerticalAlignment="Stretch"
+            HorizontalAlignment="Stretch"
+            Grid.Row="1" Grid.Column="1"
+            PlaceholderText="Query results go here!"
+            IsReadOnly="True"
+            TextWrapping="Wrap" />
     </Grid>
 </Page>

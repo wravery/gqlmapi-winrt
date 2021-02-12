@@ -20,49 +20,28 @@ using namespace std::literals;
 namespace winrt::appservice::implementation {
 
 MainPage::MainPage()
+	: m_connection { true }
 {
 	InitializeComponent();
-}
 
-int32_t MainPage::MyProperty()
-{
-	throw hresult_not_implemented();
-}
-
-void MainPage::MyProperty(int32_t /* value */)
-{
-	throw hresult_not_implemented();
+	m_resultsForeground = queryResults().Foreground();
+	m_resultsBackground = queryResults().Background();
 }
 
 fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs const&)
 {
-	myButton().Content(box_value(L"Clicked"));
+	const auto queryText { queryEdit().Text() };
+
+	queryEdit().IsReadOnly(true);
 	queryResults().Text(L"Loading...");
 
 	co_await resume_background();
 
-	Connection connection { true };
 	handle complete { CreateEventW(nullptr, false, false, nullptr) };
 	std::int32_t parsedId = -1;
 	std::optional<hstring> error;
 
-	co_await connection.ParseQuery(LR"gql(query {
-		__schema {
-			queryType {
-				name
-			}
-			mutationType {
-				name
-			}
-			subscriptionType {
-				name
-			}
-			types {
-				kind
-				name
-			}
-		}
-	})gql",
+	co_await m_connection.ParseQuery(queryText,
 		[&parsedId, &complete](std::int32_t queryId)
 	{
 		parsedId = queryId;
@@ -83,7 +62,7 @@ fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs cons
 
 	hstring results;
 
-	co_await connection.FetchQuery(parsedId, L"", {},
+	co_await m_connection.FetchQuery(parsedId, L"", {},
 		[&results](const JsonObject& fetched)
 	{
 		results = fetched.ToString();
@@ -106,10 +85,24 @@ fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs cons
 		co_return;
 	}
 
-	co_await connection.Unsubscribe(parsedId);
-	co_await connection.DiscardQuery(parsedId);
+	co_await m_connection.Unsubscribe(parsedId);
+	co_await m_connection.DiscardQuery(parsedId);
 
-	co_await connection.Shutdown(
+	co_await resume_foreground(Dispatcher());
+
+	queryResults().Text(results);
+	queryResults().Foreground(m_resultsForeground);
+	queryResults().Background(m_resultsBackground);
+
+	queryEdit().IsReadOnly(false);
+}
+
+fire_and_forget MainPage::PageUnloaded(IInspectable const&, RoutedEventArgs const&)
+{
+	handle complete { CreateEventW(nullptr, false, false, nullptr) };
+	std::optional<hstring> error;
+
+	co_await m_connection.Shutdown(
 		[&complete]()
 	{
 		SetEvent(complete.get());
@@ -127,17 +120,13 @@ fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs cons
 		ShowError(L"Shutdown"sv, *error);
 		co_return;
 	}
-
-	co_await resume_foreground(Dispatcher());
-
-	queryResults().Text(results);
 }
 
 fire_and_forget MainPage::ShowError(std::wstring_view name, std::wstring_view message)
 {
 	std::wostringstream oss;
 
-	oss << name <<  L" error: " << message;
+	oss << name << L" error: " << message;
 
 	const hstring error { oss.str() };
 
@@ -146,6 +135,8 @@ fire_and_forget MainPage::ShowError(std::wstring_view name, std::wstring_view me
 	queryResults().Text(error);
 	queryResults().Foreground(SolidColorBrush { Colors::Red() });
 	queryResults().Background(SolidColorBrush { Colors::DarkGray() });
+
+	queryEdit().IsReadOnly(false);
 }
 
 }
