@@ -116,32 +116,32 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 
 			if (itr != m_onParsed.end())
 			{
-				itr->second(static_cast<std::int32_t>(responseObject.GetNamedNumber(L"queryId")));
+				co_await itr->second(static_cast<std::int32_t>(responseObject.GetNamedNumber(L"queryId")));
 				m_onParsed.erase(itr);
 			}
 		}
 		else if (type == L"next")
 		{
-			const auto itr = m_onFetched.find(requestId);
+			const auto itr = m_onNext.find(requestId);
 
-			if (itr != m_onFetched.end())
+			if (itr != m_onNext.end())
 			{
-				itr->second(responseObject.GetNamedObject(L"fetched"));
+				co_await itr->second(responseObject.GetNamedObject(L"fetched"));
 			}
 		}
 		else if (type == L"complete")
 		{
-			const auto itrFetched = m_onFetched.find(requestId);
+			const auto itrNext = m_onNext.find(requestId);
 			const auto itrComplete = m_onComplete.find(requestId);
 
-			if (itrFetched != m_onFetched.end())
+			if (itrNext != m_onNext.end())
 			{
-				m_onFetched.erase(itrFetched);
+				m_onNext.erase(itrNext);
 			}
 
 			if (itrComplete != m_onComplete.end())
 			{
-				itrComplete->second();
+				co_await itrComplete->second(responseObject.GetNamedObject(L"fetched"));
 				m_onComplete.erase(itrComplete);
 			}
 		}
@@ -151,7 +151,7 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 
 			if (itr != m_onError.end())
 			{
-				itr->second(responseObject.GetNamedString(L"message"));
+				co_await itr->second(responseObject.GetNamedString(L"message"));
 			}
 		}
 		else if (type == L"stopped")
@@ -160,7 +160,7 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 
 			if (itr != m_onStopped.end())
 			{
-				itr->second();
+				co_await itr->second();
 			}
 
 			stopped = true;
@@ -175,7 +175,7 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 				std::wostringstream oss;
 
 				oss << L"Unexpected response type: " << std::wstring_view { type };
-				itr->second(oss.str());
+				co_await itr->second(oss.str());
 			}
 		}
 	}
@@ -195,7 +195,7 @@ Connection::~Connection()
 	Close();
 }
 
-IAsyncOperation<bool> Connection::Shutdown(const StoppedHandler& onStopped, const ErrorHandler& onError) const
+IAsyncAction Connection::Shutdown(const StoppedHandler& onStopped, const ErrorHandler& onError) const
 {
 	const auto onStoppedCopy { onStopped };
 	const auto onErrorCopy { onError };
@@ -222,12 +222,13 @@ IAsyncOperation<bool> Connection::Shutdown(const StoppedHandler& onStopped, cons
 			stopService.ToString(),
 			}));
 
-		auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
-		auto messageStatus = messageResult.Status();
+		const auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
 
-		if (messageStatus != AppServiceResponseStatus::Success)
+		if (onErrorCopy)
 		{
-			if (onErrorCopy)
+			const auto messageStatus = messageResult.Status();
+
+			if (messageStatus != AppServiceResponseStatus::Success)
 			{
 				std::wostringstream oss;
 
@@ -235,7 +236,7 @@ IAsyncOperation<bool> Connection::Shutdown(const StoppedHandler& onStopped, cons
 				onErrorCopy(oss.str());
 			}
 
-			co_return false;
+			co_return;
 		}
 
 		m_started = false;
@@ -244,11 +245,9 @@ IAsyncOperation<bool> Connection::Shutdown(const StoppedHandler& onStopped, cons
 	{
 		onStoppedCopy();
 	}
-
-	co_return true;
 }
 
-IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
+IAsyncAction Connection::ParseQuery(const hstring& query,
 	const ParsedHandler& onParsed, const ErrorHandler& onError) const
 {
 	const auto queryCopy { query };
@@ -257,7 +256,7 @@ IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
 
 	if (!co_await OpenAsync(onError))
 	{
-		co_return false;
+		co_return;
 	}
 
 	const auto requestId = m_nextRequestId++;
@@ -281,30 +280,27 @@ IAsyncOperation<bool> Connection::ParseQuery(const hstring& query,
 		parseQuery.ToString(),
 		}));
 
-	auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
-	auto messageStatus = messageResult.Status();
+	const auto messageResult = co_await m_serviceConnection.SendMessageAsync(requests);
 
-	if (messageStatus != AppServiceResponseStatus::Success)
+	if (onErrorCopy)
 	{
-		if (onErrorCopy)
+		const auto messageStatus = messageResult.Status();
+
+		if (messageStatus != AppServiceResponseStatus::Success)
 		{
 			std::wostringstream oss;
 
 			oss << L"AppServiceConnection::SendMessageAsync(parseQuery) failed: " << static_cast<int>(messageStatus);
 			onErrorCopy(oss.str());
 		}
-
-		co_return false;
 	}
-
-	co_return true;
 }
 
-IAsyncOperation<bool> Connection::DiscardQuery(std::int32_t queryId) const
+IAsyncAction Connection::DiscardQuery(std::int32_t queryId) const
 {
 	if (!m_started)
 	{
-		co_return false;
+		co_return;
 	}
 
 	const auto requestId = m_nextRequestId++;
@@ -320,29 +316,29 @@ IAsyncOperation<bool> Connection::DiscardQuery(std::int32_t queryId) const
 		discardQuery.ToString(),
 		}));
 
-	const auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
-	const auto messageStatus = messageResult.Status();
-
-	co_return (messageStatus == AppServiceResponseStatus::Success);
+	co_await m_serviceConnection.SendMessageAsync(queueRequests);
 }
 
-IAsyncOperation<bool> Connection::FetchQuery(std::int32_t queryId, const hstring& operationName, const JsonObject& variables,
-	const FetchedHandler& onFetched, const CompleteHandler& onComplete, const ErrorHandler& onError) const
+IAsyncAction Connection::FetchQuery(std::int32_t queryId, const hstring& operationName, const JsonObject& variables,
+	const FetchedHandler& onNext, const FetchedHandler& onComplete, const ErrorHandler& onError) const
 {
 	const auto operationNameCopy { operationName };
 	const auto variablesCopy { variables };
-	const auto onFetchedCopy { onFetched };
+	const auto onNextCopy { onNext };
 	const auto onCompleteCopy { onComplete };
 	const auto onErrorCopy { onError };
 
 	if (!co_await OpenAsync(onError))
 	{
-		co_return false;
+		co_return;
 	}
 
 	const auto requestId = m_nextRequestId++;
 
-	m_onFetched[requestId] = onFetchedCopy;
+	if (onNextCopy)
+	{
+		m_onNext[requestId] = onNextCopy;
+	}
 
 	if (onCompleteCopy)
 	{
@@ -368,30 +364,27 @@ IAsyncOperation<bool> Connection::FetchQuery(std::int32_t queryId, const hstring
 		fetchQuery.ToString(),
 		}));
 
-	auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
-	auto messageStatus = messageResult.Status();
+	const auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
 
-	if (messageStatus != AppServiceResponseStatus::Success)
+	if (onErrorCopy)
 	{
-		if (onErrorCopy)
+		const auto messageStatus = messageResult.Status();
+
+		if (messageStatus != AppServiceResponseStatus::Success)
 		{
 			std::wostringstream oss;
 
 			oss << L"AppServiceConnection::SendMessageAsync(fetchQuery) failed: " << static_cast<int>(messageStatus);
 			onErrorCopy(oss.str());
 		}
-
-		co_return false;
 	}
-
-	co_return true;
 }
 
-IAsyncOperation<bool> Connection::Unsubscribe(std::int32_t queryId) const
+IAsyncAction Connection::Unsubscribe(std::int32_t queryId) const
 {
 	if (!m_started)
 	{
-		co_return false;
+		co_return;
 	}
 
 	const auto requestId = m_nextRequestId++;
@@ -407,10 +400,7 @@ IAsyncOperation<bool> Connection::Unsubscribe(std::int32_t queryId) const
 		unsubscribe.ToString(),
 		}));
 
-	const auto messageResult = co_await m_serviceConnection.SendMessageAsync(queueRequests);
-	const auto messageStatus = messageResult.Status();
-
-	co_return (messageStatus == AppServiceResponseStatus::Success);
+	co_await m_serviceConnection.SendMessageAsync(queueRequests);
 }
 
 }

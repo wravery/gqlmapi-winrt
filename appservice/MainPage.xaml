@@ -11,6 +11,7 @@
     <Grid HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Padding="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="3*" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -20,28 +21,43 @@
         </Grid.ColumnDefinitions>
 
         <Button
-            x:Name="myButton"
-            Click="ClickHandler"
-            HorizontalAlignment="Left"
+            x:Name="runButton"
             Grid.Row="0"
-            Grid.Column="0">
+            Grid.Column="0"
+            Click="ClickHandler"
+            HorizontalAlignment="Left">
             Run
         </Button>
 
         <TextBox
             x:Name="queryEdit"
+            Grid.Row="1"
+            Grid.Column="0"
             VerticalAlignment="Stretch"
             HorizontalAlignment="Stretch"
-            Grid.Row="1" Grid.Column="0"
             PlaceholderText="Define your query here..."
             TextWrapping="Wrap"
             AcceptsReturn="True"
-            InputScope="Text" />
+            InputScope="NativeScript"
+            IsTextPredictionEnabled="False" />
         <TextBox
-            x:Name="queryResults"
+            x:Name="variablesEdit"
+            Grid.Row="2"
+            Grid.Column="0"
             VerticalAlignment="Stretch"
             HorizontalAlignment="Stretch"
-            Grid.Row="1" Grid.Column="1"
+            PlaceholderText="Define variables here in JSON..."
+            TextWrapping="Wrap"
+            AcceptsReturn="True"
+            InputScope="NativeScript"
+            IsTextPredictionEnabled="False" />
+        <TextBox
+            x:Name="queryResults"
+            Grid.Row="1"
+            Grid.Column="1"
+            Grid.RowSpan="2"
+            VerticalAlignment="Stretch"
+            HorizontalAlignment="Stretch"
             PlaceholderText="Query results go here!"
             IsReadOnly="True"
             TextWrapping="Wrap" />

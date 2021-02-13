@@ -4,6 +4,7 @@
 #include "graphqlservice/JSONResponse.h"
 
 #include <windows.h>
+#include <DispatcherQueue.h>
 
 #include <atomic>
 #include <iostream>
@@ -20,15 +21,16 @@ using namespace Windows::ApplicationModel::AppService;
 using namespace Windows::Data::Json;
 using namespace Windows::Foundation;
 using namespace Windows::Foundation::Collections;
+using namespace Windows::System;
 
 using namespace std::literals;
 
-struct SubscriptionPayloadQueue : implements<SubscriptionPayloadQueue, IInspectable>
+struct SubscriptionPayloadQueue : implements<SubscriptionPayloadQueue, Windows::Foundation::IInspectable>
 {
 	explicit SubscriptionPayloadQueue(const AppServiceConnection& serviceConnection, int requestId) noexcept;
 	~SubscriptionPayloadQueue();
 
-	fire_and_forget sendResponses(const com_array<JsonObject>& responses);
+	fire_and_forget sendResponse(const JsonObject& responses);
 	void Unsubscribe();
 
 	const int requestId;
@@ -50,20 +52,15 @@ SubscriptionPayloadQueue::~SubscriptionPayloadQueue()
 	Unsubscribe();
 }
 
-fire_and_forget SubscriptionPayloadQueue::sendResponses(const com_array<JsonObject>& responses)
+fire_and_forget SubscriptionPayloadQueue::sendResponse(const JsonObject& response)
 {
-	com_array<hstring> payloads(static_cast<com_array<hstring>::size_type>(responses.size()));
-
-	std::transform(responses.begin(), responses.end(), payloads.begin(),
-		[id = requestId](const JsonObject& response)
-	{
-		response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(id));
-		return response.ToString();
-	});
+	response.SetNamedValue(L"requestId", JsonValue::CreateNumberValue(requestId));
 
 	ValueSet responseMessage;
 
-	responseMessage.Insert(L"responses", PropertyValue::CreateStringArray(payloads));
+	responseMessage.Insert(L"responses", PropertyValue::CreateStringArray({
+		response.ToString()
+		}));
 
 	co_await serviceConnection.SendMessageAsync(responseMessage);
 }
@@ -85,20 +82,14 @@ void SubscriptionPayloadQueue::Unsubscribe()
 	{
 		serviceSingleton->unsubscribe(std::launch::deferred, *deferUnsubscribe).get();
 	}
-
-	JsonObject complete;
-
-	complete.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
-
-	sendResponses({ complete });
 }
 
-class Service : public implements<Service, IInspectable>
+class Service : public implements<Service, Windows::Foundation::IInspectable>
 {
 public:
-	explicit Service();
+	explicit Service(const DispatcherQueueController& controller);
 
-	IAsyncAction run();
+	fire_and_forget run();
 
 private:
 	void startService(const JsonObject& request);
@@ -112,13 +103,13 @@ private:
 	void onServiceClosed(const AppServiceConnection& sender, const AppServiceClosedEventArgs& reason);
 
 	IAsyncAction sendResponse(int requestId, const JsonObject& response);
-	static JsonObject convertNextPayload(std::future<response::Value>&& payload);
-	static JsonObject buildComplete();
+	static JsonObject convertFetchedPayload(std::wstring_view type, std::future<response::Value>&& payload);
 	static std::string ConvertToUTF8(std::wstring_view value);
 	static std::wstring ConvertToUTF16(std::string_view value);
 
 	std::shared_ptr<service::Request> serviceSingleton;
 
+	DispatcherQueue dispatcherQueue;
 	handle shutdownEvent;
 	AppServiceConnection serviceConnection;
 
@@ -126,7 +117,8 @@ private:
 	std::map<int, com_ptr<SubscriptionPayloadQueue>> subscriptionMap;
 };
 
-Service::Service()
+Service::Service(const DispatcherQueueController& controller)
+	: dispatcherQueue { controller.DispatcherQueue() }
 {
 	serviceConnection.AppServiceName(L"gqlmapi.bridge");
 	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
@@ -145,7 +137,7 @@ IAsyncAction Service::sendResponse(int requestId, const JsonObject& response)
 	co_await serviceConnection.SendMessageAsync(responseMessage);
 }
 
-JsonObject Service::convertNextPayload(std::future<response::Value>&& payload)
+JsonObject Service::convertFetchedPayload(std::wstring_view type, std::future<response::Value>&& payload)
 {
 	response::Value document { response::Type::Map };
 
@@ -169,21 +161,12 @@ JsonObject Service::convertNextPayload(std::future<response::Value>&& payload)
 		document.emplace_back(std::string { service::strErrors }, response::Value { oss.str() });
 	}
 
-	JsonObject next;
+	JsonObject fetched;
 
-	next.SetNamedValue(L"type", JsonValue::CreateStringValue(L"next"));
-	next.SetNamedValue(L"fetched", JsonObject::Parse(ConvertToUTF16(response::toJSON(std::move(document)))));
+	fetched.SetNamedValue(L"type", JsonValue::CreateStringValue(type));
+	fetched.SetNamedValue(L"fetched", JsonObject::Parse(ConvertToUTF16(response::toJSON(std::move(document)))));
 
-	return next;
-}
-
-JsonObject Service::buildComplete()
-{
-	JsonObject complete;
-
-	complete.SetNamedValue(L"type", JsonValue::CreateStringValue(L"complete"));
-
-	return complete;
+	return fetched;
 }
 
 std::string Service::ConvertToUTF8(std::wstring_view value)
@@ -230,7 +213,7 @@ std::wstring Service::ConvertToUTF16(std::string_view value)
 	return result;
 }
 
-IAsyncAction Service::run()
+fire_and_forget Service::run()
 {
 	co_await resume_background();
 
@@ -252,6 +235,10 @@ IAsyncAction Service::run()
 	co_await resume_on_signal(shutdownEvent.get());
 
 	serviceConnection.Close();
+
+	co_await resume_foreground(dispatcherQueue);
+
+	PostQuitMessage(0);
 }
 
 void Service::startService(const JsonObject& request)
@@ -311,51 +298,55 @@ IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 	auto parsedVariables = (request.HasKey(variablesKey)
 		? response::parseJSON(ConvertToUTF8(request.GetNamedObject(variablesKey).ToString()))
 		: response::Value(response::Type::Map));
+	auto payloadQueue = make_self<SubscriptionPayloadQueue>(serviceConnection, requestId);
 
-	SubscriptionPayloadQueue payloadQueue { serviceConnection, requestId };
-
-	if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
+	try
 	{
-		if (subscriptionMap.find(queryId) != subscriptionMap.end())
+		if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
 		{
-			throw std::runtime_error("Duplicate subscription");
-		}
-
-		payloadQueue.registered = true;
-		payloadQueue.key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
-			service::SubscriptionParams { nullptr,
-				peg::ast { ast },
-				std::move(operationName),
-				std::move(parsedVariables) },
-			[weak_queue { payloadQueue.get_weak() }](std::future<response::Value> payload) noexcept -> void
-		{
-			const auto subscriptionQueue { weak_queue.get() };
-
-			if (!subscriptionQueue)
+			if (subscriptionMap.find(queryId) != subscriptionMap.end())
 			{
-				return;
+				throw std::runtime_error("Duplicate subscription");
 			}
 
-			subscriptionQueue->sendResponses({
-				convertNextPayload(std::move(payload)),
-				});
-		}).get());
+			payloadQueue->registered = true;
+			payloadQueue->key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
+				service::SubscriptionParams { nullptr,
+					peg::ast { ast },
+					std::move(operationName),
+					std::move(parsedVariables) },
+				[weak_queue { payloadQueue->get_weak() }](std::future<response::Value> payload) noexcept -> void
+			{
+				const auto subscriptionQueue { weak_queue.get() };
+
+				if (!subscriptionQueue)
+				{
+					return;
+				}
+
+				subscriptionQueue->sendResponse(convertFetchedPayload(L"next"sv, std::move(payload)));
+			}).get());
+		}
+		else
+		{
+			auto payload = serviceSingleton->resolve(std::launch::deferred,
+				nullptr,
+				ast,
+				operationName,
+				std::move(parsedVariables));
+
+			payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, std::move(payload)));
+		}
+
+		subscriptionMap[queryId] = std::move(payloadQueue);
 	}
-	else
+	catch (std::exception&)
 	{
-		auto payload = serviceSingleton->resolve(std::launch::deferred,
-			nullptr,
-			ast,
-			operationName,
-			std::move(parsedVariables));
+		std::promise<response::Value> error;
 
-		payloadQueue.sendResponses({
-			convertNextPayload(std::move(payload)),
-			buildComplete(),
-			});
+		error.set_exception(std::current_exception());
+		payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, error.get_future()));
 	}
-
-	subscriptionMap[queryId] = payloadQueue.get_strong();
 
 	co_return;
 }
@@ -381,6 +372,8 @@ IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */
 	bool stopped = false;
 
 	message.Lookup(L"requests").as<IPropertyValue>().GetStringArray(requests);
+
+	co_await resume_foreground(dispatcherQueue);
 
 	for (const auto& request : requests)
 	{
@@ -426,11 +419,11 @@ IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */
 				throw std::logic_error { oss.str() };
 			}
 		}
-		catch (const std::exception& ex)
+		catch (const hresult_error& ex)
 		{
 			response = std::make_optional<JsonObject>();
 			response->SetNamedValue(L"type", JsonValue::CreateStringValue(L"error"));
-			response->SetNamedValue(L"message", JsonValue::CreateStringValue(ConvertToUTF16(ex.what())));
+			response->SetNamedValue(L"message", JsonValue::CreateStringValue(ex.message()));
 		}
 
 		if (response)
@@ -438,6 +431,8 @@ IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */
 			co_await sendResponse(requestId, *response);
 		}
 	}
+
+	co_await resume_background();
 
 	messageDeferral.Complete();
 
@@ -456,19 +451,35 @@ int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINST
 {
 	init_apartment();
 
-	//MessageBoxW(HWND_DESKTOP, L"bridge.exe is ready...", L"Attach Debugger", MB_OK);
+	DispatcherQueueController controller { nullptr };
+	DispatcherQueueOptions options {
+		sizeof(options),
+		DQTYPE_THREAD_CURRENT,
+		DQTAT_COM_STA
+	};
+
+	check_hresult(CreateDispatcherQueueController(options,
+		reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(
+			put_abi(controller))));
 
 	try
 	{
-		Service service;
+		Service service { controller };
 
-		service.run().get();
+		service.run();
+
+		MSG message;
+
+		while (GetMessageW(&message, nullptr, 0, 0))
+		{
+			DispatchMessageW(&message);
+		}
+
+		return static_cast<int>(message.wParam);
 	}
 	catch (const std::exception& e)
 	{
 		std::cerr << e.what() << std::endl;
 		return 1;
 	}
-
-	return 0;
 }

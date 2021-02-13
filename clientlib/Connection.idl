@@ -1,24 +1,23 @@
 namespace clientlib
 {
-    delegate void StoppedHandler();
-    delegate void ParsedHandler(Int32 queryId);
-    delegate void FetchedHandler(Windows.Data.Json.JsonObject fetched);
-    delegate void CompleteHandler();
-    delegate void ErrorHandler(String message);
+    delegate Windows.Foundation.IAsyncAction StoppedHandler();
+    delegate Windows.Foundation.IAsyncAction ParsedHandler(Int32 queryId);
+    delegate Windows.Foundation.IAsyncAction FetchedHandler(Windows.Data.Json.JsonObject fetched);
+    delegate Windows.Foundation.IAsyncAction ErrorHandler(String message);
 
     [default_interface]
     runtimeclass Connection
     {
         Connection(Boolean useDefaultProfile);
-        Windows.Foundation.IAsyncOperation<Boolean> Shutdown(
+        Windows.Foundation.IAsyncAction Shutdown(
             StoppedHandler onStopped, ErrorHandler onError);
 
-        Windows.Foundation.IAsyncOperation<Boolean> ParseQuery(String query,
+        Windows.Foundation.IAsyncAction ParseQuery(String query,
             ParsedHandler onParsed, ErrorHandler onError);
-        Windows.Foundation.IAsyncOperation<Boolean> DiscardQuery(Int32 queryId);
+        Windows.Foundation.IAsyncAction DiscardQuery(Int32 queryId);
 
-        Windows.Foundation.IAsyncOperation<Boolean> FetchQuery(Int32 queryId, String operationName, Windows.Data.Json.JsonObject variables,
-            FetchedHandler onFetched, CompleteHandler onComplete, ErrorHandler onError);
-        Windows.Foundation.IAsyncOperation<Boolean> Unsubscribe(Int32 queryId);
+        Windows.Foundation.IAsyncAction FetchQuery(Int32 queryId, String operationName, Windows.Data.Json.JsonObject variables,
+            FetchedHandler onNext, FetchedHandler onComplete, ErrorHandler onError);
+        Windows.Foundation.IAsyncAction Unsubscribe(Int32 queryId);
     }
 }
