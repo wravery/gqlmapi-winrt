@@ -420,11 +420,17 @@ IAsyncAction Service::onRequestReceived(const AppServiceConnection& /* sender */
 				throw std::logic_error { oss.str() };
 			}
 		}
-		catch (const hresult_error& ex)
+		catch (const std::exception& ex)
 		{
 			response = std::make_optional<JsonObject>();
 			response->SetNamedValue(L"type", JsonValue::CreateStringValue(L"error"));
-			response->SetNamedValue(L"message", JsonValue::CreateStringValue(ex.message()));
+			response->SetNamedValue(L"message", JsonValue::CreateStringValue(ConvertToUTF16(ex.what())));
+		}
+		catch (const hresult_error& hr)
+		{
+			response = std::make_optional<JsonObject>();
+			response->SetNamedValue(L"type", JsonValue::CreateStringValue(L"error"));
+			response->SetNamedValue(L"message", JsonValue::CreateStringValue(hr.message()));
 		}
 
 		if (response)
