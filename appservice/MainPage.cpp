@@ -26,6 +26,9 @@ MainPage::MainPage()
 
 	m_resultsForeground = queryResults().Foreground();
 	m_resultsBackground = queryResults().Background();
+
+	m_variablesForeground = queryResults().Foreground();
+	m_variablesBackground = queryResults().Background();
 }
 
 fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs const&)
@@ -33,7 +36,17 @@ fire_and_forget MainPage::ClickHandler(IInspectable const&, RoutedEventArgs cons
 	const auto queryText { queryEdit().Text() };
 	const auto variablesText { variablesEdit().Text() };
 
-	m_variables = variablesText.empty() ? JsonObject {} : JsonObject::Parse(variablesText);
+	if (variablesText.empty()
+		|| JsonObject::TryParse(variablesText, m_variables))
+	{
+		variablesEdit().Foreground(m_variablesForeground);
+		variablesEdit().Background(m_variablesBackground);
+	}
+	else
+	{
+		variablesEdit().Foreground(SolidColorBrush { Colors::Red() });
+		variablesEdit().Background(SolidColorBrush { Colors::DarkGray() });
+	}
 
 	if (m_parsedId)
 	{
