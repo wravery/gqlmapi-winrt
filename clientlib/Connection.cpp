@@ -77,8 +77,6 @@ IAsyncOperation<bool> Connection::OpenAsync(const ErrorHandler& onError) const
 			co_return false;
 		}
 
-		co_await FullTrustProcessLauncher::LaunchFullTrustProcessForCurrentAppAsync();
-
 		m_started = true;
 	}
 

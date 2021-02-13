@@ -232,6 +232,13 @@ IAsyncAction App::OnClientRequestReceived(const ValueSet& message)
     if (!m_bridgeConnection)
     {
         m_bridgeQueue.emplace_back(message);
+
+        if (!m_bridgeStarted)
+        {
+            m_bridgeStarted = true;
+            co_await FullTrustProcessLauncher::LaunchFullTrustProcessForCurrentAppAsync();
+        }
+
         co_return;
     }
 
@@ -255,6 +262,7 @@ void App::OnClientShutdown()
 
 void App::OnBridgeShutdown()
 {
+    m_bridgeStarted = false;
     m_bridgeConnection = nullptr;
     m_bridgeQueue.clear();
 }

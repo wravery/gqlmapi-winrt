@@ -46,6 +46,7 @@ namespace winrt::appservice::implementation
         void OnClientShutdown();
         void OnBridgeShutdown();
 
+        bool m_bridgeStarted = false;
         std::vector<Windows::Foundation::Collections::ValueSet> m_bridgeQueue;
 
         com_ptr<ServiceConnection> m_clientConnection;
