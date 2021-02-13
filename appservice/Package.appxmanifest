@@ -2,12 +2,12 @@
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" IgnorableNamespaces="uap mp">
   <Identity
     Name="9e426547-4af4-4c15-a4e1-e03fdc8c4a9e"
-    Publisher="CN=billav"
+    Publisher="CN=wravery"
     Version="1.0.0.0" />
   <mp:PhoneIdentity PhoneProductId="9e426547-4af4-4c15-a4e1-e03fdc8c4a9e" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
   <Properties>
     <DisplayName>appservice</DisplayName>
-    <PublisherDisplayName>billav</PublisherDisplayName>
+    <PublisherDisplayName>https://github.com/wravery</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
   <Dependencies>

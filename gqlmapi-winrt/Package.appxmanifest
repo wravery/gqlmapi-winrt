@@ -10,12 +10,12 @@
 
   <Identity
     Name="a7012456-f540-4a9d-8203-e902b637742f"
-    Publisher="CN=billav"
+    Publisher="CN=wravery"
     Version="1.0.0.0" />
 
   <Properties>
     <DisplayName>gqlmapi-winrt</DisplayName>
-    <PublisherDisplayName>billav</PublisherDisplayName>
+    <PublisherDisplayName>https://github.com/wravery</PublisherDisplayName>
     <Logo>Images\StoreLogo.png</Logo>
   </Properties>
 

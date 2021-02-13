@@ -121,7 +121,7 @@ Service::Service(const DispatcherQueueController& controller)
 	: dispatcherQueue { controller.DispatcherQueue() }
 {
 	serviceConnection.AppServiceName(L"gqlmapi.bridge");
-	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_jm6713a6qaa9e");
+	serviceConnection.PackageFamilyName(L"a7012456-f540-4a9d-8203-e902b637742f_rs2j33705jmqp");
 }
 
 IAsyncAction Service::sendResponse(int requestId, const JsonObject& response)
