@@ -299,54 +299,55 @@ IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 		? response::parseJSON(ConvertToUTF8(request.GetNamedObject(variablesKey).ToString()))
 		: response::Value(response::Type::Map));
 	auto payloadQueue = make_self<SubscriptionPayloadQueue>(serviceConnection, requestId);
+	auto validationErrors = serviceSingleton->validate(ast);
 
-	try
+	if (!validationErrors.empty())
 	{
-		if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
+		std::promise<response::Value> promise;
+
+		promise.set_exception(std::make_exception_ptr(service::schema_exception { std::move(validationErrors) }));
+		payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, promise.get_future()));
+
+		co_return;
+	}
+
+	if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
+	{
+		if (subscriptionMap.find(queryId) != subscriptionMap.end())
 		{
-			if (subscriptionMap.find(queryId) != subscriptionMap.end())
+			throw std::runtime_error("Duplicate subscription");
+		}
+
+		payloadQueue->registered = true;
+		payloadQueue->key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
+			service::SubscriptionParams { nullptr,
+				peg::ast { ast },
+				std::move(operationName),
+				std::move(parsedVariables) },
+			[weak_queue { payloadQueue->get_weak() }](std::future<response::Value> payload) noexcept -> void
+		{
+			const auto subscriptionQueue { weak_queue.get() };
+
+			if (!subscriptionQueue)
 			{
-				throw std::runtime_error("Duplicate subscription");
+				return;
 			}
 
-			payloadQueue->registered = true;
-			payloadQueue->key = std::make_optional(serviceSingleton->subscribe(std::launch::deferred,
-				service::SubscriptionParams { nullptr,
-					peg::ast { ast },
-					std::move(operationName),
-					std::move(parsedVariables) },
-				[weak_queue { payloadQueue->get_weak() }](std::future<response::Value> payload) noexcept -> void
-			{
-				const auto subscriptionQueue { weak_queue.get() };
-
-				if (!subscriptionQueue)
-				{
-					return;
-				}
-
-				subscriptionQueue->sendResponse(convertFetchedPayload(L"next"sv, std::move(payload)));
-			}).get());
-		}
-		else
-		{
-			auto payload = serviceSingleton->resolve(std::launch::deferred,
-				nullptr,
-				ast,
-				operationName,
-				std::move(parsedVariables));
-
-			payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, std::move(payload)));
-		}
-
-		subscriptionMap[queryId] = std::move(payloadQueue);
+			subscriptionQueue->sendResponse(convertFetchedPayload(L"next"sv, std::move(payload)));
+		}).get());
 	}
-	catch (std::exception&)
+	else
 	{
-		std::promise<response::Value> error;
+		auto payload = serviceSingleton->resolve(std::launch::deferred,
+			nullptr,
+			ast,
+			operationName,
+			std::move(parsedVariables));
 
-		error.set_exception(std::current_exception());
-		payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, error.get_future()));
+		payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, std::move(payload)));
 	}
+
+	subscriptionMap[queryId] = std::move(payloadQueue);
 
 	co_return;
 }
