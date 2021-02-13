@@ -17,5 +17,5 @@ with a command like this:
 > cmake --build . --config RelWithDebInfo --target package
 ```
 
-Then open (gqlmapi-winrt.sln)[./gqlmapi-winrt.sln] in Visual Studio 2019. Add a local NuGet source directory to Visual Studio pointing to the directory with the NuGet
+Then open [gqlmapi-winrt.sln](./gqlmapi-winrt.sln) in Visual Studio 2019. Add a local NuGet source directory to Visual Studio pointing to the directory with the NuGet
 package, and restore the missing packages for the solution.
