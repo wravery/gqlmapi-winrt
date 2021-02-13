@@ -11,11 +11,12 @@ application with a native module wrapped around [clientlib](./clientlib/).
 
 ## Getting Started
 
-You'll need to build a NuGet package from [GqlMAPI](https://github.com/microsoft/gqlmapi). Once you have the CMake build directory configured, you can build the package
-with a command like this:
+You'll need to build a NuGet package from [GqlMAPI](https://github.com/microsoft/gqlmapi). Once you have the CMake build directory configured, 
+* Build the package with a command like this:
 ```shell
 > cmake --build . --config RelWithDebInfo --target package
 ```
-
-Then open [gqlmapi-winrt.sln](./gqlmapi-winrt.sln) in Visual Studio 2019. Add a local NuGet source directory to Visual Studio pointing to the directory with the NuGet
-package, and restore the missing packages for the solution.
+* Open [gqlmapi-winrt.sln](./gqlmapi-winrt.sln) in Visual Studio 2019.
+* Set the active configuration to `Release` `x64`.
+* Add a local NuGet source directory to Visual Studio pointing to the directory with the NuGet package.
+* Restore the missing packages for the solution.
