@@ -74,8 +74,8 @@ void SubscriptionPayloadQueue::Unsubscribe()
 
 	registered = false;
 
-	auto deferUnsubscribe = std::move(key);
-	auto serviceSingleton = wpService.lock();
+	auto deferUnsubscribe { std::move(key) };
+	auto serviceSingleton { wpService.lock() };
 
 	if (deferUnsubscribe
 		&& serviceSingleton)
@@ -454,7 +454,8 @@ void Service::onServiceClosed(const AppServiceConnection& /* sender */, const Ap
 	SetEvent(shutdownEvent.get());
 }
 
-int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] PWSTR pCmdLine, [[maybe_unused]] int nCmdShow)
+_Use_decl_annotations_
+int WINAPI wWinMain(HINSTANCE /* hInstance */, HINSTANCE /* hPrevInstance */, PWSTR /* pCmdLine */, int /* nCmdShow */)
 {
 	init_apartment();
 
