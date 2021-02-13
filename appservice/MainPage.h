@@ -29,6 +29,8 @@ namespace winrt::appservice::implementation
 
         Windows::UI::Xaml::Media::Brush m_resultsForeground { nullptr };
         Windows::UI::Xaml::Media::Brush m_resultsBackground { nullptr };
+        Windows::UI::Xaml::Media::Brush m_variablesForeground { nullptr };
+        Windows::UI::Xaml::Media::Brush m_variablesBackground { nullptr };
     };
 }
 
