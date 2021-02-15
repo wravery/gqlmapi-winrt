@@ -94,6 +94,7 @@ void Connection::Close() const
 
 IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender */, const AppServiceRequestReceivedEventArgs& args) const
 {
+	const auto strong_this { const_cast<Connection*>(this)->get_strong() };
 	const auto messageDeferral { args.GetDeferral() };
 	const auto messageRequest { args.Request() };
 	const auto message { messageRequest.Message() };
@@ -117,6 +118,8 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 				co_await itr->second(static_cast<std::int32_t>(responseObject.GetNamedNumber(L"queryId")));
 				m_onParsed.erase(itr);
 			}
+
+			m_onError.erase(requestId);
 		}
 		else if (type == L"next")
 		{
@@ -129,19 +132,16 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 		}
 		else if (type == L"complete")
 		{
-			const auto itrNext = m_onNext.find(requestId);
-			const auto itrComplete = m_onComplete.find(requestId);
+			const auto itr = m_onComplete.find(requestId);
 
-			if (itrNext != m_onNext.end())
+			if (itr != m_onComplete.end())
 			{
-				m_onNext.erase(itrNext);
+				co_await itr->second(responseObject.GetNamedObject(L"fetched"));
+				m_onComplete.erase(itr);
 			}
 
-			if (itrComplete != m_onComplete.end())
-			{
-				co_await itrComplete->second(responseObject.GetNamedObject(L"fetched"));
-				m_onComplete.erase(itrComplete);
-			}
+			m_onNext.erase(requestId);
+			m_onError.erase(requestId);
 		}
 		else if (type == L"error")
 		{
@@ -150,7 +150,13 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 			if (itr != m_onError.end())
 			{
 				co_await itr->second(responseObject.GetNamedString(L"message"));
+				m_onError.erase(itr);
 			}
+
+			m_onParsed.erase(requestId);
+			m_onNext.erase(requestId);
+			m_onComplete.erase(requestId);
+			m_onStopped.erase(requestId);
 		}
 		else if (type == L"stopped")
 		{
@@ -159,8 +165,10 @@ IAsyncAction Connection::OnRequestReceived(const AppServiceConnection& /* sender
 			if (itr != m_onStopped.end())
 			{
 				co_await itr->second();
+				m_onStopped.erase(itr);
 			}
 
+			m_onError.erase(requestId);
 			stopped = true;
 			break;
 		}
