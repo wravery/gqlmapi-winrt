@@ -266,8 +266,15 @@ void Service::stopService(JsonObject& response)
 void Service::parseQuery(const JsonObject& request, JsonObject& response)
 {
 	const int queryId = (queryMap.empty() ? 1 : queryMap.crbegin()->first + 1);
+	auto ast = peg::parseString(ConvertToUTF8(request.GetNamedString(L"query")));
+	auto validationErrors = serviceSingleton->validate(ast);
 
-	queryMap[queryId] = peg::parseString(ConvertToUTF8(request.GetNamedString(L"query")));
+	if (!validationErrors.empty())
+	{
+		throw service::schema_exception { std::move(validationErrors) };
+	}
+
+	queryMap[queryId] = std::move(ast);
 
 	response.SetNamedValue(L"type", JsonValue::CreateStringValue(L"parsed"));
 	response.SetNamedValue(L"queryId", JsonValue::CreateNumberValue(queryId));
@@ -299,17 +306,6 @@ IAsyncAction Service::fetchQuery(int requestId, const JsonObject& request)
 		? response::parseJSON(ConvertToUTF8(request.GetNamedObject(variablesKey).ToString()))
 		: response::Value(response::Type::Map));
 	auto payloadQueue = make_self<SubscriptionPayloadQueue>(serviceConnection, requestId);
-	auto validationErrors = serviceSingleton->validate(ast);
-
-	if (!validationErrors.empty())
-	{
-		std::promise<response::Value> promise;
-
-		promise.set_exception(std::make_exception_ptr(service::schema_exception { std::move(validationErrors) }));
-		payloadQueue->sendResponse(convertFetchedPayload(L"complete"sv, promise.get_future()));
-
-		co_return;
-	}
 
 	if (serviceSingleton->findOperationDefinition(ast, operationName).first == service::strSubscription)
 	{
